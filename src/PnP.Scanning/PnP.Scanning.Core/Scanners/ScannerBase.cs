@@ -167,27 +167,20 @@ namespace PnP.Scanning.Core.Scanners
             return clientContext;
         }
 
-        internal static List<PnP.Core.Model.SharePoint.IList> CleanLoadedLists(PnPContext context)
+        internal static List<PnP.Core.Model.SharePoint.IList> CleanLoadedLists(
+            PnPContext context,
+            bool includeHiddenPageLibraries = false)
         {
             List<PnP.Core.Model.SharePoint.IList> lists = new();
 
             foreach(var list in context.Web.Lists.AsRequested())
             {
-                if (list.Hidden)
+                if (!ShouldIncludeLoadedList(
+                    list.Hidden,
+                    list.DefaultViewUrl,
+                    list.TemplateType,
+                    includeHiddenPageLibraries))
                 {
-                    // Skip hidden lists
-                    continue;
-                }
-                
-                if (list.DefaultViewUrl.Contains("_catalogs"))
-                {
-                    // skip catalogs
-                    continue;
-                }
-
-                if (list.TemplateType == PnP.Core.Model.SharePoint.ListTemplateType.MySiteMicroBlogList)
-                {
-                    // skip MicroFeed (544)
                     continue;
                 }
 
@@ -196,6 +189,35 @@ namespace PnP.Scanning.Core.Scanners
 
             return lists;
         }
+
+        internal static bool ShouldIncludeLoadedList(
+            bool hidden,
+            string defaultViewUrl,
+            PnP.Core.Model.SharePoint.ListTemplateType templateType,
+            bool includeHiddenPageLibraries)
+        {
+            // Catalogs and the MicroFeed are not content-page surfaces in the Classic assessment.
+            if (defaultViewUrl?.Contains("_catalogs", StringComparison.OrdinalIgnoreCase) == true ||
+                templateType == PnP.Core.Model.SharePoint.ListTemplateType.MySiteMicroBlogList)
+            {
+                return false;
+            }
+
+            if (!hidden)
+            {
+                return true;
+            }
+
+            // Hidden is provenance for page discovery, not a deletion condition. Keep the existing
+            // hidden-list behavior for list/InfoPath/extensibility components, but retain readable page
+            // libraries before ASPX classification.
+            return includeHiddenPageLibraries && IsPageLibrary(templateType);
+        }
+
+        private static bool IsPageLibrary(PnP.Core.Model.SharePoint.ListTemplateType templateType) =>
+            templateType is PnP.Core.Model.SharePoint.ListTemplateType.WebPageLibrary or
+                PnP.Core.Model.SharePoint.ListTemplateType.PublishingPagesLibrary or
+                PnP.Core.Model.SharePoint.ListTemplateType.Posts;
 
         internal static bool ErrorIndicatesFileFolderDoesNotExists(PnP.Core.SharePointRestError error)
         {

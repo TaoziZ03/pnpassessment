@@ -18,6 +18,17 @@ ClassicBlogPages | Number of classic blog pages
 ClassicWebPartPages | Number of classic web part pages
 ClassicPublishingPages | Number of classic publishing pages
 ModernPages | Number of modern pages found in this web
+PageDiscoveryOutputVersion | Version of the Classic ASPX observation/selection projection
+PageDiscoveryState | `complete`, `partial`, or `failed`
+PageDiscoveryGapCodes | Stable gap code such as `welcome_page_denied` or `welcome_page_error`
+WelcomePageStatus | `success`, `success_empty`, `denied`, or `error`
+WelcomePageEvidence | Non-secret exception type/server error/correlation evidence for denied or error results
+HomePageOnly | True when `--homepageonly` was requested
+AllAspxObserved | Number of ASPX rows observed before Classic selection
+ClassicSelected | Number of observed rows selected into Classic processing
+ClassicExcluded | Number of observed rows explicitly excluded by Classic selection policy
+PageSelectionNotEvaluated | Number of rows whose home-page selection could not be evaluated
+HiddenAspxObserved | Number of observed ASPX rows from hidden page libraries
 PagesWithWebParts | Number of classic pages that carry at least one web part
 MappableWebPartPages | Number of pages (with web parts) whose web parts are fully mappable (mapping percentage of 100)
 UnmappedWebPartPages | Number of pages (with web parts) that have at least one unmapped web part (mapping percentage below 100)

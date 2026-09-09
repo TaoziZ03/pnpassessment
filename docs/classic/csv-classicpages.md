@@ -19,6 +19,9 @@ ListId | Id of the library the page lives in
 ModifiedAt | When the page was last modified
 Layout | The detected page layout (e.g. a wiki `TwoColumns`, a web part page `FullPageVertical`, or the publishing page layout name such as `ArticleLeft`)
 HomePage | True when this page is the web's home (welcome) page
+HomePageKnown | True when `HomePage` is a resolved result. When false, inspect `WelcomePageStatus` and do not interpret `HomePage=false` as a non-home classification
+WelcomePageStatus | `success`, `success_empty`, `denied`, or `error`
+LibraryHidden | True when the source page library was hidden; hidden readable page libraries are still assessed
 UncustomizedHomePage | True when this home page is still the default, uncustomized home page (only meaningful when `HomePage` is true)
 ModifiedBy | Display name of the user who last modified the page (empty when `--skipuserinformation` was specified)
 WebPartCount | Number of web parts found on the page

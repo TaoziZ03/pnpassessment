@@ -1398,8 +1398,9 @@ namespace PnP.Scanning.Core.Storage
             }
         }
 
-        internal async Task StorePageSummaryAsync(Guid scanId, string siteUrl, string webUrl, string template, PnPContext context, HashSet<string> remediationCodes, int modernPageCounter, 
-                                                  int wikiPageCounter, int blogPageCounter, int webPartPageCounter, int aspxPageCounter, int publishingPageCounter)
+        internal async Task StorePageSummaryAsync(Guid scanId, string siteUrl, string webUrl, string template, PnPContext context, HashSet<string> remediationCodes, int modernPageCounter,
+                                                  int wikiPageCounter, int blogPageCounter, int webPartPageCounter, int aspxPageCounter, int publishingPageCounter,
+                                                  ClassicPageDiscoverySummary discoverySummary)
         {
             using (var dbContext = new ScanContext(scanId))
             {
@@ -1426,10 +1427,31 @@ namespace PnP.Scanning.Core.Storage
                 webSummary.ClassicPublishingPages = publishingPageCounter;
                 webSummary.ModernPages = modernPageCounter;
                 webSummary.ClassicPages = aspxPageCounter + blogPageCounter + wikiPageCounter + webPartPageCounter + publishingPageCounter;
+                webSummary.PageDiscoveryOutputVersion = discoverySummary.OutputVersion;
+                webSummary.PageDiscoveryState = discoverySummary.State;
+                webSummary.PageDiscoveryGapCodes = discoverySummary.GapCodes;
+                webSummary.WelcomePageStatus = discoverySummary.WelcomePageStatus;
+                webSummary.WelcomePageEvidence = discoverySummary.WelcomePageEvidence;
+                webSummary.HomePageOnly = discoverySummary.HomePageOnly;
+                webSummary.AllAspxObserved = discoverySummary.AllAspxObserved;
+                webSummary.ClassicSelected = discoverySummary.ClassicSelected;
+                webSummary.ClassicExcluded = discoverySummary.ClassicExcluded;
+                webSummary.PageSelectionNotEvaluated = discoverySummary.SelectionNotEvaluated;
+                webSummary.HiddenAspxObserved = discoverySummary.HiddenAspxObserved;
                 webSummary.AggregatedRemediationCodes = AggregateRemediationCodes(remediationCodes, webSummary);
 
                 await dbContext.SaveChangesAsync();
                 Log.Information("StorePageSummaryAsync succeeded");
+            }
+        }
+
+        internal async Task StoreClassicPageDiscoveryAsync(Guid scanId, List<ClassicPageDiscovery> discoveries)
+        {
+            using (var dbContext = new ScanContext(scanId))
+            {
+                await dbContext.ClassicPageDiscoveries.AddRangeAsync(discoveries);
+                await dbContext.SaveChangesAsync();
+                Log.Information("StoreClassicPageDiscoveryAsync succeeded");
             }
         }
 

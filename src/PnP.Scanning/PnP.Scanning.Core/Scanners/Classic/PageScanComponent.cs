@@ -60,6 +60,7 @@ namespace PnP.Scanning.Core.Scanners
             var options = ((ClassicScanner)scannerBase).Options;
 
             List<ClassicPage> pagesList = new();
+            List<ClassicPageDiscovery> discoveryRows = new();
             List<PageEnrichmentInput> enrichmentInputs = new();
             HashSet<string> remediationCodes = new();
 
@@ -67,7 +68,17 @@ namespace PnP.Scanning.Core.Scanners
             bool webPublishingEnabled = FeatureEnabled(context.Web.Features, FeatureId_Web_Publishing);
 
             // The web's welcome page drives the HomePage flag and the optional HomePageOnly filter.
-            string welcomePage = await GetWelcomePageAsync(csomContext).ConfigureAwait(false);
+            WelcomePageResolution welcomePage = await GetWelcomePageAsync(csomContext).ConfigureAwait(false);
+            if (!welcomePage.IsAvailable)
+            {
+                scannerBase.Logger.Warning(
+                    "WelcomePage evaluation for {SiteUrl}{WebUrl} is {WelcomePageStatus}; Classic page discovery will be {DiscoveryState}. Evidence: {Evidence}",
+                    scannerBase.SiteUrl,
+                    scannerBase.WebUrl,
+                    welcomePage.Status,
+                    options.HomePageOnly ? ClassicAspxDiscoveryContract.Failed : ClassicAspxDiscoveryContract.Partial,
+                    welcomePage.Evidence);
+            }
 
             var discovery = new PageDiscovery
             {
@@ -76,11 +87,12 @@ namespace PnP.Scanning.Core.Scanners
                 HomePageOnly = options.HomePageOnly,
                 SkipUserInformation = options.SkipUserInformation,
                 Pages = pagesList,
+                DiscoveryRows = discoveryRows,
                 RemediationCodes = remediationCodes,
                 EnrichmentInputs = enrichmentInputs,
             };
 
-            var lists = ScannerBase.CleanLoadedLists(context);
+            var lists = ScannerBase.CleanLoadedLists(context, includeHiddenPageLibraries: true);
 
             if (scannerBase.WebTemplate == "BLOG#0")
             {
@@ -169,6 +181,11 @@ namespace PnP.Scanning.Core.Scanners
                 await scannerBase.StorageManager.StorePageInformationAsync(scannerBase.ScanId, pagesList);
             }
 
+            if (discoveryRows.Count > 0)
+            {
+                await scannerBase.StorageManager.StoreClassicPageDiscoveryAsync(scannerBase.ScanId, discoveryRows);
+            }
+
             if (webPartsList.Count > 0)
             {
                 await scannerBase.StorageManager.StorePageWebPartsAsync(scannerBase.ScanId, webPartsList);
@@ -203,15 +220,33 @@ namespace PnP.Scanning.Core.Scanners
                 }
             }
 
+            ClassicPageDiscoverySummary discoverySummary = ClassicAspxDiscoveryContract.Summarize(
+                discoveryRows,
+                welcomePage,
+                options.HomePageOnly);
             await scannerBase.StorageManager.StorePageSummaryAsync(scannerBase.ScanId, scannerBase.SiteUrl, scannerBase.WebUrl, scannerBase.WebTemplate, context, remediationCodes,
-                                                                   discovery.ModernPageCounter, wikiPageCounter, blogPageCounter, webPartPageCounter, aspxPageCounter, publishingPageCounter);
+                                                                   discovery.ModernPageCounter, wikiPageCounter, blogPageCounter, webPartPageCounter, aspxPageCounter, publishingPageCounter,
+                                                                   discoverySummary);
+
+            // A HomePageOnly selection without a readable WelcomePage has no defensible numerator.
+            // Evidence has already been committed above; fail the web so the outer scanner cannot stamp
+            // Finished + 0 rows as a successful result.
+            if (options.HomePageOnly && !welcomePage.IsAvailable)
+            {
+                throw new WelcomePageUnavailableException(welcomePage);
+            }
         }
 
         private static void AddBlogPage(PageDiscovery disc, IList blogList, IListItem listItem)
         {
             string pageUrl = GetFieldValue(listItem, FileRefField, $"{listItem.Id}");
+            if (!IsAspxPage(pageUrl))
+            {
+                return;
+            }
 
-            if (disc.HomePageOnly && !HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage))
+            ClassicPageSelection selection = RecordDiscovery(disc, blogList, listItem, pageUrl, BlogPage);
+            if (selection.State != ClassicAspxDiscoveryContract.Selected)
             {
                 return;
             }
@@ -229,7 +264,10 @@ namespace PnP.Scanning.Core.Scanners
                 ModifiedAt = GetFieldValue<DateTime>(listItem, ModifiedField),
                 ModifiedBy = GetModifiedBy(listItem.Values, disc.SkipUserInformation),
                 PageType = BlogPage,
-                HomePage = HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage),
+                HomePage = selection.IsHomePage ?? false,
+                HomePageKnown = selection.IsHomePage.HasValue,
+                WelcomePageStatus = disc.WelcomePage.Status,
+                LibraryHidden = blogList.Hidden,
                 RemediationCode = RemediationCodes.CP4.ToString(),
             });
 
@@ -239,8 +277,18 @@ namespace PnP.Scanning.Core.Scanners
         private static void AddSitePage(PageDiscovery disc, IList sitePagesLibrary, IListItem listItem)
         {
             string pageUrl = GetFieldValue(listItem, FileRefField, $"{listItem.Id}");
+            if (!IsAspxPage(pageUrl))
+            {
+                return;
+            }
 
-            if (disc.HomePageOnly && !HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage))
+            string pageType = GetPageType(listItem);
+            ClassicPageSelection selection = RecordDiscovery(disc, sitePagesLibrary, listItem, pageUrl, pageType);
+            if (pageType == ModernPage)
+            {
+                disc.ModernPageCounter++;
+            }
+            if (selection.State != ClassicAspxDiscoveryContract.Selected)
             {
                 return;
             }
@@ -257,8 +305,11 @@ namespace PnP.Scanning.Core.Scanners
                 ListId = sitePagesLibrary.Id,
                 ModifiedAt = GetFieldValue<DateTime>(listItem, ModifiedField),
                 ModifiedBy = GetModifiedBy(listItem.Values, disc.SkipUserInformation),
-                PageType = GetPageType(listItem),
-                HomePage = HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage),
+                PageType = pageType,
+                HomePage = selection.IsHomePage ?? false,
+                HomePageKnown = selection.IsHomePage.HasValue,
+                WelcomePageStatus = disc.WelcomePage.Status,
+                LibraryHidden = sitePagesLibrary.Hidden,
             };
 
             switch (pageToAdd.PageType)
@@ -292,10 +343,6 @@ namespace PnP.Scanning.Core.Scanners
                     });
                 }
             }
-            else
-            {
-                disc.ModernPageCounter++;
-            }
         }
 
         private static async Task QueryPublishingPagesAsync(PageDiscovery disc, List<IList> lists)
@@ -317,8 +364,13 @@ namespace PnP.Scanning.Core.Scanners
         private static void AddPublishingPage(PageDiscovery disc, IList pagesLibrary, IListItem listItem)
         {
             string pageUrl = GetFieldValue(listItem, FileRefField, $"{listItem.Id}");
+            if (!IsAspxPage(pageUrl))
+            {
+                return;
+            }
 
-            if (disc.HomePageOnly && !HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage))
+            ClassicPageSelection selection = RecordDiscovery(disc, pagesLibrary, listItem, pageUrl, PublishingPage);
+            if (selection.State != ClassicAspxDiscoveryContract.Selected)
             {
                 return;
             }
@@ -336,7 +388,10 @@ namespace PnP.Scanning.Core.Scanners
                 ModifiedAt = GetFieldValue<DateTime>(listItem, ModifiedField),
                 ModifiedBy = GetModifiedBy(listItem.Values, disc.SkipUserInformation),
                 PageType = PublishingPage,
-                HomePage = HomePageDetector.IsHomePage(pageUrl, disc.WelcomePage),
+                HomePage = selection.IsHomePage ?? false,
+                HomePageKnown = selection.IsHomePage.HasValue,
+                WelcomePageStatus = disc.WelcomePage.Status,
+                LibraryHidden = pagesLibrary.Hidden,
                 RemediationCode = RemediationCodes.CP3.ToString(),
             };
 
@@ -352,6 +407,43 @@ namespace PnP.Scanning.Core.Scanners
                 FileLeafRef = GetFieldValue(listItem, FileLeafRefField, ""),
             });
         }
+
+        private static ClassicPageSelection RecordDiscovery(
+            PageDiscovery disc,
+            IList pageLibrary,
+            IListItem listItem,
+            string pageUrl,
+            string pageType)
+        {
+            ClassicPageSelection selection = ClassicAspxDiscoveryContract.EvaluateSelection(
+                pageUrl,
+                pageType,
+                disc.WelcomePage,
+                disc.HomePageOnly);
+            string title = GetFieldValue(listItem, TitleField, "");
+            disc.DiscoveryRows.Add(new ClassicPageDiscovery
+            {
+                ScanId = disc.ScannerBase.ScanId,
+                SiteUrl = disc.ScannerBase.SiteUrl,
+                WebUrl = disc.ScannerBase.WebUrl,
+                OutputVersion = ClassicAspxDiscoveryContract.OutputVersion,
+                PageUrl = pageUrl,
+                PageName = title != "" ? title : Path.GetFileNameWithoutExtension(pageUrl),
+                PageType = pageType,
+                ListUrl = pageLibrary.RootFolder.ServerRelativeUrl,
+                ListTitle = pageLibrary.Title,
+                ListId = pageLibrary.Id,
+                LibraryHidden = pageLibrary.Hidden,
+                ObservationState = ClassicAspxDiscoveryContract.Observed,
+                SelectionState = selection.State,
+                HomePage = selection.IsHomePage,
+                WelcomePageStatus = disc.WelcomePage.Status,
+            });
+            return selection;
+        }
+
+        internal static bool IsAspxPage(string pageUrl) =>
+            string.Equals(Path.GetExtension(pageUrl), ".aspx", StringComparison.OrdinalIgnoreCase);
 
         // Dispatches a discovered page to the right web part extractor. Web part / wiki / publishing
         // pages each have a dedicated CSOM extraction path; anything else yields no web parts.
@@ -445,21 +537,28 @@ namespace PnP.Scanning.Core.Scanners
         }
 
         // Reads the web's welcome page (server-relative-from-web), used for the HomePage flag and the
-        // HomePageOnly filter. Returns an empty string when the property cannot be read so discovery
-        // continues (HomePageDetector defaults the empty welcome page to default.aspx).
-        private static async Task<string> GetWelcomePageAsync(ClientContext csomContext)
-        {
-            try
+        // HomePageOnly filter. Empty is a successful, distinct response; denied/error remain unavailable
+        // instead of being collapsed into the legacy default.aspx fallback.
+        private static Task<WelcomePageResolution> GetWelcomePageAsync(ClientContext csomContext) =>
+            ResolveWelcomePageAsync(async () =>
             {
                 var rootFolder = csomContext.Web.RootFolder;
                 csomContext.Load(rootFolder, f => f.WelcomePage);
                 await csomContext.ExecuteQueryAsync().ConfigureAwait(false);
+                return rootFolder.WelcomePage;
+            });
 
-                return rootFolder.WelcomePage ?? "";
-            }
-            catch
+        internal static async Task<WelcomePageResolution> ResolveWelcomePageAsync(Func<Task<string>> readWelcomePage)
+        {
+            ArgumentNullException.ThrowIfNull(readWelcomePage);
+            try
             {
-                return "";
+                return ClassicAspxDiscoveryContract.FromValue(
+                    await readWelcomePage().ConfigureAwait(false));
+            }
+            catch (Exception ex)
+            {
+                return ClassicAspxDiscoveryContract.FromException(ex);
             }
         }
 
@@ -507,7 +606,7 @@ namespace PnP.Scanning.Core.Scanners
             }
         }
 
-        private static string PageQuery(List<string> extraFields, bool filterOnASPXPages = true)
+        internal static string PageQuery(List<string> extraFields, bool filterOnASPXPages = true)
         {
             string extraViewFields = "";
             string filter = "";
@@ -525,10 +624,10 @@ namespace PnP.Scanning.Core.Scanners
                 filter = $@"
                           <Query>
                             <Where>
-                              <Contains>
+                              <Eq>
                                 <FieldRef Name='File_x0020_Type'/>
                                 <Value Type='text'>aspx</Value>
-                              </Contains>
+                              </Eq>
                             </Where>
                           </Query>";
             }
@@ -634,13 +733,15 @@ namespace PnP.Scanning.Core.Scanners
         {
             public ScannerBase ScannerBase { get; init; }
 
-            public string WelcomePage { get; init; }
+            public WelcomePageResolution WelcomePage { get; init; }
 
             public bool HomePageOnly { get; init; }
 
             public bool SkipUserInformation { get; init; }
 
             public List<ClassicPage> Pages { get; init; }
+
+            public List<ClassicPageDiscovery> DiscoveryRows { get; init; }
 
             public HashSet<string> RemediationCodes { get; init; }
 

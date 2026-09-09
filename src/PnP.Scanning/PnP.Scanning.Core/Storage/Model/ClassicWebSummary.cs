@@ -27,6 +27,29 @@ namespace PnP.Scanning.Core.Storage
 
         public int ModernPages { get; set; }
 
+        // Versioned ASPX observation denominator and Classic selection/completeness projection.
+        public string PageDiscoveryOutputVersion { get; set; }
+
+        public string PageDiscoveryState { get; set; }
+
+        public string PageDiscoveryGapCodes { get; set; }
+
+        public string WelcomePageStatus { get; set; }
+
+        public string WelcomePageEvidence { get; set; }
+
+        public bool HomePageOnly { get; set; }
+
+        public int AllAspxObserved { get; set; }
+
+        public int ClassicSelected { get; set; }
+
+        public int ClassicExcluded { get; set; }
+
+        public int PageSelectionNotEvaluated { get; set; }
+
+        public int HiddenAspxObserved { get; set; }
+
         // Page transformation readiness rollups (T9 — aggregated from the web's ClassicPages).
         public int PagesWithWebParts { get; set; }
 

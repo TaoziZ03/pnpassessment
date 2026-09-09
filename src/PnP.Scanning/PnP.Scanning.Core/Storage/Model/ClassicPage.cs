@@ -25,6 +25,14 @@ namespace PnP.Scanning.Core.Storage
 
         public bool HomePage { get; set; }
 
+        // HomePage is retained as a compatibility boolean. Consumers must inspect HomePageKnown before
+        // treating false as a resolved result; denied/error WelcomePage reads deliberately leave it unknown.
+        public bool HomePageKnown { get; set; }
+
+        public string WelcomePageStatus { get; set; }
+
+        public bool LibraryHidden { get; set; }
+
         public bool UncustomizedHomePage { get; set; }
 
         public string ModifiedBy { get; set; }

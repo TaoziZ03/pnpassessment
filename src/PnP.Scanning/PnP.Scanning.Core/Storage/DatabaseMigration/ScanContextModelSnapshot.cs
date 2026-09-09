@@ -506,11 +506,17 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                     b.Property<bool>("HomePage")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("HomePageKnown")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Layout")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("ListId")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("LibraryHidden")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("ListTitle")
                         .HasColumnType("TEXT");
@@ -545,12 +551,70 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                     b.Property<int>("WebPartCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("WelcomePageStatus")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("ScanId", "SiteUrl", "WebUrl", "PageUrl");
 
                     b.HasIndex("ScanId", "SiteUrl", "WebUrl", "PageUrl")
                         .IsUnique();
 
                     b.ToTable("ClassicPages");
+                });
+
+            modelBuilder.Entity("PnP.Scanning.Core.Storage.ClassicPageDiscovery", b =>
+                {
+                    b.Property<Guid>("ScanId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SiteUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WebUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PageUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool?>("HomePage")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("LibraryHidden")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("ListId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ListTitle")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ListUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObservationState")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OutputVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PageName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PageType")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SelectionState")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WelcomePageStatus")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ScanId", "SiteUrl", "WebUrl", "PageUrl");
+
+                    b.HasIndex("ScanId", "SiteUrl", "WebUrl", "PageUrl")
+                        .IsUnique();
+
+                    b.ToTable("ClassicPageDiscoveries");
                 });
 
             modelBuilder.Entity("PnP.Scanning.Core.Storage.ClassicPageAuditUsage", b =>
@@ -885,6 +949,9 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                     b.Property<string>("AggregatedRemediationCodes")
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("AllAspxObserved")
+                        .HasColumnType("INTEGER");
+
                     b.Property<double>("AvgMappingPercentage")
                         .HasColumnType("REAL");
 
@@ -895,6 +962,9 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("ClassicBlogPages")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ClassicExcluded")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("ClassicExtensibilities")
@@ -910,6 +980,9 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("ClassicPublishingPages")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ClassicSelected")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("ClassicWebPartPages")
@@ -936,6 +1009,12 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                     b.Property<bool>("HasSharePointAddIns")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("HiddenAspxObserved")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("HomePageOnly")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("IsClassicPublishingSite")
                         .HasColumnType("INTEGER");
 
@@ -960,6 +1039,18 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
                     b.Property<int>("PagesWithWebParts")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("PageDiscoveryGapCodes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PageDiscoveryOutputVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PageDiscoveryState")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PageSelectionNotEvaluated")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RemediationCode")
                         .HasColumnType("TEXT");
 
@@ -974,6 +1065,12 @@ namespace PnP.Scanning.Core.Storage.DatabaseMigration
 
                     b.Property<int>("UnmappedWebPartPages")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("WelcomePageEvidence")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WelcomePageStatus")
+                        .HasColumnType("TEXT");
 
                     b.HasKey("ScanId", "SiteUrl", "WebUrl");
 

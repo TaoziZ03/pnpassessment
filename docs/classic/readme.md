@@ -6,6 +6,7 @@ This module carries the classic page scanning capability of the older [SharePoin
 
 The assessment provides you with:
 
+- A lossless, versioned ASPX observation denominator, including hidden-library provenance and explicit selection state — see [classicaspxdiscovery.csv](csv-classicaspxdiscovery.md).
 - A per-page inventory of the classic pages found (page type, layout, home-page flags, last modified, usage) — see [classicpages.csv](csv-classicpages.md).
 - A per-page audit log usage report (view/create/edit counts and distinct users per classic page) — see [classicpageauditusage.csv](csv-classicpageauditusage.md).
 - A per-web-part inventory of every web part found on those pages — see [classicpagewebparts.csv](csv-classicpagewebparts.md).
