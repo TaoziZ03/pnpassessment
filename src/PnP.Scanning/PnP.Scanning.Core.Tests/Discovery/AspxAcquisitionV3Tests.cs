@@ -3,7 +3,10 @@ using Microsoft.Data.Sqlite;
 using PnP.Scanning.Core.Discovery;
 using PnP.Scanning.Process.Commands;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace PnP.Scanning.Core.Tests.Discovery;
@@ -129,6 +132,188 @@ public sealed class AspxAcquisitionV3Tests
 
         AspxAggregateEvaluator.Evaluate(physical, reference, ReferenceManifest(),
             Registry(min: "17.0.0", max: "17.0.1"), out _).Should().Be(AspxAggregateVerdict.Unknown); // R5
+    }
+
+    [Fact]
+    public async Task Official_registry_bytes_pass_exact_schema_digest_authority_and_build_gate()
+    {
+        var bytes = await File.ReadAllBytesAsync(OfficialRegistryPath());
+        var result = AspxPlatformRegistryAuthorityGate.Validate(bytes, OfficialProfile.PlatformBuild);
+
+        result.Errors.Should().BeEmpty();
+        result.CanonicalHash.Should().Be(OfficialProfile.RegistryCanonicalHash);
+        result.Registry.RegistryRevision.Should().Be(OfficialProfile.RegistryRevision);
+        result.Registry.RegistryHash.Should().Be(OfficialProfile.RegistryCanonicalHash);
+        result.Registry.EntryCount.Should().Be(1161);
+        result.Registry.Entries.Should().HaveCount(1161);
+        result.Registry.Entries.Count(entry =>
+            entry.DownstreamDisposition == AspxReferenceDispositions.ReferenceUnavailable &&
+            entry.IdentityAxes.VirtualHandlerIdentity.AuthorityMapBlobId ==
+                "6327ceafe958ce4825b004330ff1a093c82cbc06").Should().Be(11);
+
+        var continuationCalls = 0;
+        var accepted = await AspxPlatformRegistryAuthorityGate.ExecuteThenAsync(
+            OfficialRegistryPath(), OfficialProfile.PlatformBuild, (registry, _) =>
+            {
+                continuationCalls++;
+                return Task.FromResult(registry.EntryCount);
+            });
+        accepted.Should().Be(1161);
+        continuationCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Exact_registry_gate_rejects_schema_pin_range_revision_hash_authority_and_build_drift_before_callback()
+    {
+        var exact = await File.ReadAllBytesAsync(OfficialRegistryPath());
+        var cases = new (string Name, byte[] Bytes, string Build, string Expected)[]
+        {
+            ("unknown field", MutateOfficial(root => root["unreviewedField"] = true),
+                OfficialProfile.PlatformBuild, "schema_additional_property:$.unreviewedField"),
+            ("unknown version", MutateOfficial(root => root["registrySchemaVersion"] = "aspx-platform-registry/v2"),
+                OfficialProfile.PlatformBuild, "schema_const:$.registrySchemaVersion"),
+            ("widened range", MutateOfficial(root => root["platformBuildMin"] = "16.0.27709.12000"),
+                OfficialProfile.PlatformBuild, "reviewed_pin_mismatch:platformBuildMin"),
+            ("revision drift", MutateOfficial(root => root["registryRevision"] = "spo-online-16.0.27709.12001-r2"),
+                OfficialProfile.PlatformBuild, "reviewed_pin_mismatch:registryRevision"),
+            ("declared hash drift", MutateOfficial(root => root["registryHash"] = HashA),
+                OfficialProfile.PlatformBuild, "reviewed_pin_mismatch:registryHash"),
+            ("canonical drift", MutateOfficial(root =>
+                root["entries"]![0]!["canonicalRequestPath"] = "/_layouts/15/changed.aspx"),
+                OfficialProfile.PlatformBuild, "registry_canonical_hash_not_reviewed"),
+            ("authority drift", MutateOfficial(root => root["authoritySourceRef"] =
+                "1111111111111111111111111111111111111111"), OfficialProfile.PlatformBuild,
+                "reviewed_pin_mismatch:authoritySourceRef"),
+            ("schema locator drift", MutateOfficial(root => root["$schema"] = "../schema/future.schema.json"),
+                OfficialProfile.PlatformBuild, "schema_const:$.$schema"),
+            ("unknown disposition", MutateOfficial(root =>
+                root["entries"]![0]!["downstreamDisposition"] = "FutureDisposition"),
+                OfficialProfile.PlatformBuild, "schema_enum:$.entries[0].downstreamDisposition"),
+            ("self-consistent rehash", MutateOfficial(root =>
+                root["registryRevision"] = "spo-online-16.0.27709.12001-r2", rehash: true),
+                OfficialProfile.PlatformBuild, "registry_canonical_hash_not_reviewed"),
+            ("prior build", exact, "16.0.27709.12000", "reviewed_profile_missing_for_exact_build"),
+            ("future build", exact, "16.0.27709.12002", "reviewed_profile_missing_for_exact_build"),
+            ("unknown build", exact, "unknown-build", "reviewed_profile_missing_for_exact_build"),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var result = AspxPlatformRegistryAuthorityGate.Validate(testCase.Bytes, testCase.Build);
+            result.Errors.Should().Contain(testCase.Expected, testCase.Name);
+        }
+
+        using var directory = new TemporaryDirectory();
+        var invalidPath = directory.File("widened.registry.json");
+        await File.WriteAllBytesAsync(invalidPath,
+            MutateOfficial(root => root["platformBuildMin"] = "16.0.27709.12000"));
+        var networkCalls = 0;
+        var action = () => AspxPlatformRegistryAuthorityGate.ExecuteThenAsync(
+            invalidPath, OfficialProfile.PlatformBuild, (_, _) =>
+            {
+                networkCalls++;
+                return Task.FromResult(0);
+            });
+        await action.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*before authentication/network*");
+        networkCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Official_unavailable_virtual_entries_retain_disposition_reason_subtype_and_provenance()
+    {
+        var registry = await AspxPlatformRegistryAuthorityGate.ReadAndValidateAsync(
+            OfficialRegistryPath(), OfficialProfile.PlatformBuild);
+        var manifest = ReferenceManifest() with
+        {
+            RegistryRevision = OfficialProfile.RegistryRevision,
+            RegistryHash = OfficialProfile.RegistryCanonicalHash,
+            PlatformBuildRef = OfficialProfile.PlatformBuild,
+        };
+        var output = new AspxReferenceCollector().Build(RunId, manifest, Physical(), registry);
+
+        output.GapCodes.Should().BeEmpty();
+        output.CoverageVerdict.Should().Be(AspxAggregateVerdict.Incomplete);
+        output.References.Should().HaveCount(1161);
+        var unavailable = output.References.Where(observation =>
+            observation.Disposition == AspxReferenceDispositions.ReferenceUnavailable).ToArray();
+        unavailable.Should().HaveCount(11);
+        unavailable.Should().OnlyContain(observation =>
+            observation.SourceKind == AspxReferenceSourceKinds.PlatformRegistry &&
+            observation.HandlerOrArtifactType == "VirtualHandler.SPLayoutsMappedFile" &&
+            observation.ExpectedAvailability == "ReferenceTargetAbsentAtFrozenBuild" &&
+            observation.ReasonCode == "ReferenceTargetAbsentAtFrozenBuild" &&
+            observation.ContentOrigin == "VirtualHandler" &&
+            observation.LinkedPhysicalCanonicalInventoryKey == null &&
+            observation.LinkedFileUniqueId == null &&
+            observation.EvidenceRefs.Any(reference => reference.StartsWith("authority-map:", StringComparison.Ordinal)) &&
+            observation.EvidenceRefs.Any(reference => reference.StartsWith("source:", StringComparison.Ordinal)) &&
+            observation.EvidenceRefs.Any(reference => reference.StartsWith("handler-type:", StringComparison.Ordinal)));
+        output.References.Should().NotContain(observation =>
+            unavailable.Select(item => item.ReferenceId).Contains(observation.ReferenceId) &&
+            (observation.Disposition == AspxReferenceDispositions.ReferenceOnlyAvailable ||
+             observation.Disposition == AspxReferenceDispositions.LinkedPhysicalGhosted ||
+             observation.Disposition == AspxReferenceDispositions.LinkedPhysicalCustomized));
+    }
+
+    [Fact]
+    public async Task Official_registry_bounded_fixture_writes_five_digest_bound_output_roles()
+    {
+        var retainedEvidencePath = Environment.GetEnvironmentVariable("CCD845_EVIDENCE_DIR");
+        using var directory = new TemporaryDirectory();
+        var registry = await AspxPlatformRegistryAuthorityGate.ReadAndValidateAsync(
+            OfficialRegistryPath(), OfficialProfile.PlatformBuild);
+        using var factory = new FakeRestClientFactory();
+        using var provider = new SharePointLiveAspxDiscoveryProvider(new(
+            new[] { new Uri("https://contoso.sharepoint.com/sites/a") }, "delegated-user-a",
+            "declared-sites", "fixture-authority/v1", HashA, OfficialProfile.PlatformBuild), factory);
+        var result = await new AspxAcquisitionRuntime().RunAsync(provider, new(
+            directory.File("physical.sqlite"), directory.File("physical.json"),
+            directory.File("reference.sqlite"), directory.File("reference.json"),
+            directory.File("aggregate.json"), PhysicalManifest(), "declared_subset",
+            FixtureRun: false, TenantVisibilityVerified: false, HashB, OfficialProfile.PlatformBuild,
+            "official-registry-fixture", registry, NewRunId: RunId));
+
+        result.Reference.References.Count(reference =>
+            reference.SourceKind == AspxReferenceSourceKinds.PlatformRegistry &&
+            reference.Disposition == AspxReferenceDispositions.ReferenceUnavailable).Should().Be(11);
+        var outputs = new[]
+        {
+            new AspxTerminalOutputSpec(AspxTerminalVolumeRoles.PhysicalDatabase,
+                DiscoveryRunManifest.CurrentSchemaVersion, directory.File("physical.sqlite")),
+            new AspxTerminalOutputSpec(AspxTerminalVolumeRoles.PhysicalOutput,
+                AspxDiscoveryOutputV2.Version, directory.File("physical.json")),
+            new AspxTerminalOutputSpec(AspxTerminalVolumeRoles.ReferenceDatabase,
+                AspxAcquisitionVersions.ReferenceStore, directory.File("reference.sqlite")),
+            new AspxTerminalOutputSpec(AspxTerminalVolumeRoles.ReferenceOutput,
+                AspxReferenceOutputV2.Version, directory.File("reference.json")),
+            new AspxTerminalOutputSpec(AspxTerminalVolumeRoles.AggregateOutput,
+                AspxAcquisitionVerdictV2.Version, directory.File("aggregate.json")),
+        };
+        var executablePath = Path.Combine(AppContext.BaseDirectory, "microsoft365-assessment.dll");
+        File.Exists(executablePath).Should().BeTrue();
+        var executableFile = await AspxAggregateEvaluator.HashFileAsync(executablePath);
+        var executable = new AspxManagedExecutableBinding("microsoft365-assessment", "1.13.0", "1.13.0",
+            Path.GetFileName(executablePath), executableFile.Hash, executableFile.Length, HashA, 3,
+            null, null, null);
+        var terminalPath = directory.File("terminal.json");
+        var terminal = await AspxTerminalRunReceiptWriter.WriteAsync(terminalPath, RunId, 0, "Succeeded",
+            PhysicalManifest().ProductRef, PhysicalManifest().SdkRef, "official-registry-fixture",
+            result.Aggregate.AggregateVerdict.ToString(), executable, outputs);
+
+        terminal.Volumes.Should().HaveCount(5);
+        terminal.Volumes.Should().OnlyContain(volume => volume.Length > 0 && volume.Sha256.Length == 64);
+        (await AspxTerminalRunReceiptValidator.ReadAndValidateAsync(terminalPath, outputs)).Volumes
+            .Should().HaveCount(5);
+        if (!string.IsNullOrWhiteSpace(retainedEvidencePath))
+        {
+            if (Directory.Exists(retainedEvidencePath) &&
+                Directory.EnumerateFileSystemEntries(retainedEvidencePath).Any())
+                throw new InvalidOperationException($"Evidence directory '{retainedEvidencePath}' must be empty.");
+            Directory.CreateDirectory(retainedEvidencePath);
+            foreach (var path in outputs.Select(output => output.Path).Append(terminalPath))
+                File.Copy(path, Path.Combine(retainedEvidencePath, Path.GetFileName(path)));
+        }
     }
 
     [Theory]
@@ -639,14 +824,41 @@ public sealed class AspxAcquisitionV3Tests
         "1111111111111111111111111111111111111111", DiscoveryRunManifest.CurrentContractVersion,
         DiscoveryRunManifest.CurrentSchemaVersion, HashA, HashA, HashA, HashA, HashA, HashA, HashA, HashA);
 
-    private static AspxPlatformRegistryV1 Registry(string min = "16.0.0", string max = "16.0.9",
-        IReadOnlyList<AspxPlatformRegistryEntry> entries = null) => new(
+    private static AspxPlatformRegistryV1 Registry(string min = "16.0.1", string max = "16.0.1",
+        IReadOnlyList<AspxPlatformRegistryEntry> entries = null)
+    {
+        entries ??= Array.Empty<AspxPlatformRegistryEntry>();
+        return new(
         AspxAcquisitionVersions.Registry, "registry/v1", HashA, "SPO.Core-reviewed-source",
         "repo@1111111111111111111111111111111111111111", HashB, "CCD-394-review",
-        DateTimeOffset.UtcNow, "SharePointOnline", min, max, entries ?? Array.Empty<AspxPlatformRegistryEntry>());
+        DateTimeOffset.UtcNow, "SharePointOnline", min, max, entries, entries.Count);
+    }
 
     private static AspxPlatformRegistryEntry Entry(string id, string path, IReadOnlyList<string> aliases) => new(
-        id, "SetupOrVirtual", path, aliases, "VirtualHandler", "rule", HashA, "Available", "Delegate");
+        id, "SetupLayoutApplicationPage", path, aliases, "SetupArtifact.AspxApplicationPage", "rule", HashA,
+        "AvailableForExactPlatformBuild", AspxReferenceDispositions.ReferenceOnlyAvailable,
+        ContentOrigin: "SetupArtifact");
+
+    private static AspxReviewedPlatformRegistryProfile OfficialProfile =>
+        AspxReviewedPlatformRegistryProfiles.SpoOnline2770912001;
+
+    private static string OfficialRegistryPath() => Path.Combine(AppContext.BaseDirectory,
+        "Fixtures", "Discovery", "RegistryAuthority", "spo-online-16.0.27709.12001.registry.json");
+
+    private static byte[] MutateOfficial(Action<JsonObject> mutate, bool rehash = false)
+    {
+        var root = JsonNode.Parse(File.ReadAllBytes(OfficialRegistryPath()))!.AsObject();
+        mutate(root);
+        if (rehash)
+        {
+            root["registryHash"] = string.Empty;
+            using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(root));
+            root["registryHash"] = Convert.ToHexString(SHA256.HashData(
+                CanonicalJson.SerializeWithoutRootProperty(document.RootElement, "registryHash")))
+                .ToLowerInvariant();
+        }
+        return JsonSerializer.SerializeToUtf8Bytes(root, new JsonSerializerOptions { WriteIndented = true });
+    }
 
     private static AspxReviewedNotApplicableRule Rule() => new(
         "rule-1", "v1", HashA, "review", "approval", "16.0.0", "16.0.9",
@@ -808,7 +1020,8 @@ public sealed class AspxAcquisitionV3Tests
     {
         internal TemporaryDirectory()
         {
-            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aspx-acquisition-v3-" + Guid.NewGuid().ToString("N"));
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "aspx-acquisition-v3-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path);
         }
         internal string Path { get; }

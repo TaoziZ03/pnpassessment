@@ -28,6 +28,7 @@
 
 	<ItemGroup>
 		<None Update="Fixtures\Discovery\*.json" CopyToOutputDirectory="PreserveNewest" />
+		<None Update="Fixtures\Discovery\RegistryAuthority\*.json" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
 </Project>

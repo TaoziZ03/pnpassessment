@@ -183,75 +183,73 @@ internal sealed class AspxAcquisitionCommandHandler
             if (manifest.ContractVersion != DiscoveryRunManifest.CurrentContractVersion ||
                 manifest.SchemaVersion != DiscoveryRunManifest.CurrentSchemaVersion)
                 throw new InvalidOperationException("Physical manifest must remain aspx-discovery/v2 + aspx-discovery-sqlite/v2.");
-            var registry = JsonSerializer.Deserialize<AspxPlatformRegistryV1>(
-                await File.ReadAllTextAsync(options.Registry.FullName, cancellationToken),
-                AspxInventoryRuntime.JsonOptions())
-                ?? throw new InvalidOperationException("Registry JSON did not contain aspx-platform-registry/v1.");
-            var registryInvalid = registry.Validate(options.PlatformBuild);
-            if (registryInvalid.Count > 0)
-                throw new InvalidOperationException("Independent registry cannot close this build: " + string.Join(", ", registryInvalid));
-            if (options.ResumeRunId != null && File.Exists(options.TerminalReceipt.FullName))
-            {
-                AspxTerminalRunReceiptV1 previous;
-                try
+            var result = await AspxPlatformRegistryAuthorityGate.ExecuteThenAsync(
+                options.Registry.FullName, options.PlatformBuild, async (registry, gateCancellationToken) =>
                 {
-                    previous = await AspxTerminalRunReceiptValidator.ReadAndValidateAsync(
-                        options.TerminalReceipt.FullName, OutputSpecs(options), cancellationToken);
-                }
-                catch
-                {
-                    terminalPathSafe = false;
-                    throw;
-                }
-                if (previous.ArtifactRunId != artifactRunId ||
-                    !string.Equals(previous.ProductRef, manifest.ProductRef, StringComparison.Ordinal) ||
-                    !string.Equals(previous.SnapshotFence, options.SnapshotFence, StringComparison.Ordinal))
-                {
-                    terminalPathSafe = false;
-                    throw new InvalidOperationException(
-                        "Terminal resume rejected: the existing receipt is bound to a different run, product ref, or snapshot fence. Preserve it and use a new terminal receipt path.");
-                }
-            }
+                    if (options.ResumeRunId != null && File.Exists(options.TerminalReceipt.FullName))
+                    {
+                        AspxTerminalRunReceiptV1 previous;
+                        try
+                        {
+                            previous = await AspxTerminalRunReceiptValidator.ReadAndValidateAsync(
+                                options.TerminalReceipt.FullName, OutputSpecs(options), gateCancellationToken);
+                        }
+                        catch
+                        {
+                            terminalPathSafe = false;
+                            throw;
+                        }
+                        if (previous.ArtifactRunId != artifactRunId ||
+                            !string.Equals(previous.ProductRef, manifest.ProductRef, StringComparison.Ordinal) ||
+                            !string.Equals(previous.SnapshotFence, options.SnapshotFence, StringComparison.Ordinal))
+                        {
+                            terminalPathSafe = false;
+                            throw new InvalidOperationException(
+                                "Terminal resume rejected: the existing receipt is bound to a different run, product ref, or snapshot fence. Preserve it and use a new terminal receipt path.");
+                        }
+                    }
 
-            var environment = Microsoft365Environment.Production;
-            if (!string.IsNullOrWhiteSpace(configuration?.Environment) &&
-                Enum.TryParse(configuration.Environment, out Microsoft365Environment configured))
-                environment = configured;
-            var authentication = new AuthenticationManager(dataProtectionProvider);
-            await authentication.VerifyAuthenticationAsync(options.Tenant, options.AuthMode.ToString(), environment,
-                options.ApplicationId, options.TenantId, options.CertPath, options.CertFile, options.CertPassword,
-                deviceCode =>
-                {
-                    AnsiConsole.MarkupLine(Markup.Escape(deviceCode.Message));
-                    return Task.CompletedTask;
-                }).ConfigureAwait(false);
-            var authProvider = new ExternalAuthenticationProvider((_, scopes) =>
-                authentication.GetAccessTokenAsync(scopes));
-            var tenantRoot = new Uri(AuthenticationManager.GetSiteFromTenant(options.Tenant));
-            var authority = await AspxTenantAuthorityCapture.CaptureAsync(options.ScopeMode, tenantRoot,
-                options.Sites.Select(site => new Uri(site)).ToArray(),
-                new PnPCoreAspxTenantAuthorityAdapter(contextFactory, authProvider), cancellationToken)
-                .ConfigureAwait(false);
-            manifest = manifest with
-            {
-                ScopePolicyHash = authority.AuthorityHash,
-                TenantManifestHash = authority.AuthorityHash,
-            };
-            using var clientFactory = new PnPContextSharePointAspxRestClientFactory(contextFactory, authProvider);
-            using var provider = new SharePointLiveAspxDiscoveryProvider(
-                new(authority.Sites.Items.Select(site => site.Url).ToArray(), options.PermissionContext,
-                    options.VisibilityBoundary, authority.AuthorityRevision, authority.AuthorityHash,
-                    options.PlatformBuild, authority), clientFactory);
-            var permissionHash = DiscoveryHash.Of(options.PermissionContext, options.VisibilityBoundary,
-                options.AuthMode.ToString(), options.TenantId ?? string.Empty, authority.ScopeMode,
-                authority.AuthorityHash);
-            var result = await new AspxAcquisitionRuntime().RunAsync(provider,
-                new(options.PhysicalDatabase.FullName, options.PhysicalOutput.FullName,
-                    options.ReferenceDatabase.FullName, options.ReferenceOutput.FullName,
-                    options.AggregateOutput.FullName, manifest, authority.ScopeMode, FixtureRun: false,
-                    TenantVisibilityVerified: authority.TenantVisibilityVerified, permissionHash, options.PlatformBuild,
-                    options.SnapshotFence, registry, options.ResumeRunId,
-                    options.ResumeRunId == null ? artifactRunId : null), cancellationToken).ConfigureAwait(false);
+                    var environment = Microsoft365Environment.Production;
+                    if (!string.IsNullOrWhiteSpace(configuration?.Environment) &&
+                        Enum.TryParse(configuration.Environment, out Microsoft365Environment configured))
+                        environment = configured;
+                    var authentication = new AuthenticationManager(dataProtectionProvider);
+                    await authentication.VerifyAuthenticationAsync(options.Tenant, options.AuthMode.ToString(),
+                        environment, options.ApplicationId, options.TenantId, options.CertPath,
+                        options.CertFile, options.CertPassword, deviceCode =>
+                        {
+                            AnsiConsole.MarkupLine(Markup.Escape(deviceCode.Message));
+                            return Task.CompletedTask;
+                        }).ConfigureAwait(false);
+                    var authProvider = new ExternalAuthenticationProvider((_, scopes) =>
+                        authentication.GetAccessTokenAsync(scopes));
+                    var tenantRoot = new Uri(AuthenticationManager.GetSiteFromTenant(options.Tenant));
+                    var authority = await AspxTenantAuthorityCapture.CaptureAsync(options.ScopeMode, tenantRoot,
+                        options.Sites.Select(site => new Uri(site)).ToArray(),
+                        new PnPCoreAspxTenantAuthorityAdapter(contextFactory, authProvider), gateCancellationToken)
+                        .ConfigureAwait(false);
+                    manifest = manifest with
+                    {
+                        ScopePolicyHash = authority.AuthorityHash,
+                        TenantManifestHash = authority.AuthorityHash,
+                    };
+                    using var clientFactory = new PnPContextSharePointAspxRestClientFactory(contextFactory, authProvider);
+                    using var provider = new SharePointLiveAspxDiscoveryProvider(
+                        new(authority.Sites.Items.Select(site => site.Url).ToArray(), options.PermissionContext,
+                            options.VisibilityBoundary, authority.AuthorityRevision, authority.AuthorityHash,
+                            options.PlatformBuild, authority), clientFactory);
+                    var permissionHash = DiscoveryHash.Of(options.PermissionContext, options.VisibilityBoundary,
+                        options.AuthMode.ToString(), options.TenantId ?? string.Empty, authority.ScopeMode,
+                        authority.AuthorityHash);
+                    return await new AspxAcquisitionRuntime().RunAsync(provider,
+                        new(options.PhysicalDatabase.FullName, options.PhysicalOutput.FullName,
+                            options.ReferenceDatabase.FullName, options.ReferenceOutput.FullName,
+                            options.AggregateOutput.FullName, manifest, authority.ScopeMode, FixtureRun: false,
+                            TenantVisibilityVerified: authority.TenantVisibilityVerified, permissionHash,
+                            options.PlatformBuild, options.SnapshotFence, registry, options.ResumeRunId,
+                            options.ResumeRunId == null ? artifactRunId : null), gateCancellationToken)
+                        .ConfigureAwait(false);
+                }, cancellationToken).ConfigureAwait(false);
             aggregate = result.Aggregate;
             exitCode = 0;
             completionState = "Succeeded";

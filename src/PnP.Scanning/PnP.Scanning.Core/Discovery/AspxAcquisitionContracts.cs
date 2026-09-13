@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace PnP.Scanning.Core.Discovery;
 
@@ -138,20 +139,38 @@ internal sealed record AspxPlatformRegistryV1(
     string PlatformFamily,
     string PlatformBuildMin,
     string PlatformBuildMax,
-    IReadOnlyList<AspxPlatformRegistryEntry> Entries)
+    IReadOnlyList<AspxPlatformRegistryEntry> Entries,
+    int EntryCount = 0)
 {
     internal bool IsCompatible(string platformBuildRef) =>
         RegistrySchemaVersion == AspxAcquisitionVersions.Registry &&
         !string.IsNullOrWhiteSpace(RegistryRevision) && IsHash(RegistryHash) &&
         !string.IsNullOrWhiteSpace(AuthorityKind) && !string.IsNullOrWhiteSpace(AuthoritySourceRef) &&
         IsHash(AuthorityArtifactHash) && !string.IsNullOrWhiteSpace(ReviewRef) &&
-        !string.IsNullOrWhiteSpace(platformBuildRef) &&
-        CompareBuild(platformBuildRef, PlatformBuildMin) >= 0 && CompareBuild(platformBuildRef, PlatformBuildMax) <= 0;
+        !string.IsNullOrWhiteSpace(PlatformFamily) && !string.IsNullOrWhiteSpace(platformBuildRef) &&
+        string.Equals(platformBuildRef, PlatformBuildMin, StringComparison.Ordinal) &&
+        string.Equals(platformBuildRef, PlatformBuildMax, StringComparison.Ordinal) &&
+        EntryCount == (Entries?.Count ?? 0);
 
     internal IReadOnlyList<string> Validate(string platformBuildRef)
     {
         var invalid = new List<string>();
         if (!IsCompatible(platformBuildRef)) invalid.Add("registry_or_platform_binding");
+        foreach (var entry in Entries ?? Array.Empty<AspxPlatformRegistryEntry>())
+        {
+            if (!AspxReferenceDispositions.IsKnown(entry.DownstreamDisposition))
+                invalid.Add("registry_unknown_downstream_disposition:" + entry.ReferenceId);
+            if (string.IsNullOrWhiteSpace(entry.HandlerOrArtifactType))
+                invalid.Add("registry_handler_or_artifact_type_missing:" + entry.ReferenceId);
+            if (entry.DownstreamDisposition == AspxReferenceDispositions.ReferenceUnavailable &&
+                (!string.Equals(entry.ExpectedAvailability, "ReferenceTargetAbsentAtFrozenBuild",
+                    StringComparison.Ordinal) ||
+                 !string.Equals(entry.HandlerOrArtifactType, "VirtualHandler.SPLayoutsMappedFile",
+                    StringComparison.Ordinal) ||
+                 !string.Equals(entry.ContentOrigin, "VirtualHandler", StringComparison.Ordinal) ||
+                 entry.IdentityAxes?.VirtualHandlerIdentity == null))
+                invalid.Add("registry_unavailable_disposition_provenance_invalid:" + entry.ReferenceId);
+        }
         var collisions = (Entries ?? Array.Empty<AspxPlatformRegistryEntry>())
             .SelectMany(entry => new[] { entry.CanonicalRequestPath }.Concat(entry.Aliases ?? Array.Empty<string>())
                 .Select(path => (Path: NormalizeRequestPath(path), Entry: entry.ReferenceId)))
@@ -172,15 +191,6 @@ internal sealed record AspxPlatformRegistryV1(
         return normalized.ToLowerInvariant();
     }
 
-    private static int CompareBuild(string left, string right)
-    {
-        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return int.MinValue;
-        if (right == "*") return 0;
-        if (Version.TryParse(left, out var leftVersion) && Version.TryParse(right, out var rightVersion))
-            return leftVersion.CompareTo(rightVersion);
-        return string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static bool IsHash(string value) => value?.Length == 64 && value.All(Uri.IsHexDigit) &&
         string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal);
 }
@@ -194,7 +204,30 @@ internal sealed record AspxPlatformRegistryEntry(
     string ApplicabilityRuleId,
     string ApplicabilityRuleHash,
     string ExpectedAvailability,
-    string DownstreamDisposition);
+    string DownstreamDisposition,
+    IReadOnlyList<string> AliasPatterns = null,
+    string ContentOrigin = null,
+    AspxPlatformRegistryIdentityAxes IdentityAxes = null,
+    AspxPlatformRegistryPhysicalIdentity PhysicalIdentity = null);
+
+internal sealed record AspxPlatformRegistryIdentityAxes(
+    JsonElement? RequestReferenceIdentity,
+    JsonElement? SetupArtifactIdentity,
+    AspxPlatformRegistryVirtualHandlerIdentity VirtualHandlerIdentity,
+    JsonElement? GhostedPhysicalFileIdentity);
+
+internal sealed record AspxPlatformRegistryVirtualHandlerIdentity(
+    string AuthorityMapBlobId,
+    string AuthorityMapPath,
+    string HandlerType,
+    string MappedTargetState,
+    bool? ServerTransferOnPost,
+    string SourcePath);
+
+internal sealed record AspxPlatformRegistryPhysicalIdentity(
+    string FileUniqueId,
+    string PhysicalLocator,
+    string StorageIdentity);
 
 internal sealed record AspxReviewedNotApplicableRule(
     string RuleId,
@@ -435,7 +468,9 @@ internal sealed record AspxReferenceObservation(
     string LinkedFileUniqueId,
     string ContentOrigin,
     string PermissionContext,
-    IReadOnlyList<string> EvidenceRefs)
+    IReadOnlyList<string> EvidenceRefs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string HandlerOrArtifactType = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string ExpectedAvailability = null)
 {
     internal const string RequiredRecordKind = "AspxReferenceObservation";
 
@@ -457,6 +492,13 @@ internal sealed record AspxReferenceObservation(
         if (Disposition == AspxReferenceDispositions.LinkedPhysicalGhosted &&
             !string.Equals(ContentOrigin, "verified-ghosted", StringComparison.Ordinal))
             invalid.Add("ghosted_origin_unverified");
+        if (SourceKind == AspxReferenceSourceKinds.PlatformRegistry &&
+            string.IsNullOrWhiteSpace(HandlerOrArtifactType))
+            invalid.Add("registry_handler_or_artifact_type_missing");
+        if (SourceKind == AspxReferenceSourceKinds.PlatformRegistry &&
+            Disposition == AspxReferenceDispositions.ReferenceUnavailable &&
+            string.IsNullOrWhiteSpace(ExpectedAvailability))
+            invalid.Add("registry_unavailable_reason_missing");
         return invalid;
     }
 }

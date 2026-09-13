@@ -92,8 +92,10 @@ internal sealed class AspxReferenceCollector
         denominatorSnapshot = denominatorSnapshot.Append(new AspxSurfaceDenominatorRow(
             AspxAcquisitionVersions.SurfaceContract, runId, manifest.SnapshotFence, manifest.ScopeAuthorityHash,
             "platform-registry", null, "platform-registry:" + registry.RegistryRevision,
-            AspxSurfaceApplicability.SystemOrVirtualOnly, null, null, null, registry.ReviewRef, null,
-            manifest.PlatformBuildRef, AspxRuntimeCounterexampleState.NoneObserved,
+            AspxSurfaceApplicability.SystemOrVirtualOnly, "assessment.platform-registry.exact-profile",
+            registry.RegistryRevision, registry.RegistryHash, registry.ReviewRef,
+            "CCD-411:approve_with_changes", manifest.PlatformBuildRef,
+            AspxRuntimeCounterexampleState.NoneObserved,
             registry.AuthorityKind, registry.AuthoritySourceRef, registry.RegistryRevision,
             registry.AuthorityArtifactHash, "READ", registry.AuthoritySourceRef, "registry entries", string.Empty,
             "independent-platform-registry", "reviewed-registry", registryCompatible ? registryEntries.Count : null,
@@ -111,18 +113,7 @@ internal sealed class AspxReferenceCollector
 
         var observations = candidateSnapshot.Select(candidate => Finalize(candidate, manifest, physical, gapSnapshot))
             .Concat((registry.Entries ?? Array.Empty<AspxPlatformRegistryEntry>()).Select(entry =>
-                new AspxReferenceObservation(
-                    DiscoveryHash.Of(runId.ToString("D"), AspxReferenceSourceKinds.PlatformRegistry, entry.ReferenceId),
-                    AspxReferenceObservation.RequiredRecordKind, AspxReferenceSourceKinds.PlatformRegistry,
-                    entry.ReferenceId, "IndependentPlatformRegistry", entry.ReferenceId, null,
-                    AspxPlatformRegistryV1.NormalizeRequestPath(entry.CanonicalRequestPath), null,
-                    manifest.PlatformBuildRef, registry.RegistryRevision, registry.RegistryHash,
-                    string.Equals(entry.HandlerOrArtifactType, "VirtualHandler", StringComparison.OrdinalIgnoreCase)
-                        ? AspxReferenceDispositions.VirtualHandler : AspxReferenceDispositions.ReferenceOnlyAvailable,
-                    null, null, null,
-                    string.Equals(entry.HandlerOrArtifactType, "VirtualHandler", StringComparison.OrdinalIgnoreCase)
-                        ? "verified-registry-virtual" : "registry-reference-only",
-                    "independent-platform-registry", new[] { registry.AuthoritySourceRef, registry.ReviewRef })))
+                FromRegistryEntry(runId, manifest, registry, entry, gapSnapshot)))
             .OrderBy(item => item.ReferenceObservationId, StringComparer.Ordinal).ToArray();
 
         foreach (var observation in observations)
@@ -148,6 +139,49 @@ internal sealed class AspxReferenceCollector
             paginationSnapshot.OrderBy(row => row.CollectionScopeKey, StringComparer.Ordinal)
                 .ThenBy(row => row.PageOrdinal).ToArray(),
             gapSnapshot.OrderBy(value => value, StringComparer.Ordinal).ToArray());
+    }
+
+    private static AspxReferenceObservation FromRegistryEntry(Guid runId, AspxReferenceRunManifest manifest,
+        AspxPlatformRegistryV1 registry, AspxPlatformRegistryEntry entry, ISet<string> gaps)
+    {
+        var disposition = entry.DownstreamDisposition;
+        if (!AspxReferenceDispositions.IsKnown(disposition))
+        {
+            gaps.Add("registry:unknown_downstream_disposition:" + entry.ReferenceId);
+            disposition = AspxReferenceDispositions.Unknown;
+        }
+        var evidence = new List<string>
+        {
+            registry.AuthoritySourceRef,
+            registry.ReviewRef,
+            $"registry:{registry.RegistryRevision}#entry:{entry.ReferenceId}",
+            "handler-or-artifact:" + (entry.HandlerOrArtifactType ?? "missing"),
+        };
+        var virtualHandler = entry.IdentityAxes?.VirtualHandlerIdentity;
+        if (virtualHandler != null)
+        {
+            AddEvidence(evidence, "authority-map", virtualHandler.AuthorityMapPath,
+                virtualHandler.AuthorityMapBlobId);
+            AddEvidence(evidence, "handler-type", virtualHandler.HandlerType);
+            AddEvidence(evidence, "mapped-target-state", virtualHandler.MappedTargetState);
+            AddEvidence(evidence, "source", virtualHandler.SourcePath);
+        }
+
+        return new AspxReferenceObservation(
+            DiscoveryHash.Of(runId.ToString("D"), AspxReferenceSourceKinds.PlatformRegistry, entry.ReferenceId),
+            AspxReferenceObservation.RequiredRecordKind, AspxReferenceSourceKinds.PlatformRegistry,
+            entry.ReferenceId, "IndependentPlatformRegistry", entry.ReferenceId, null,
+            AspxPlatformRegistryV1.NormalizeRequestPath(entry.CanonicalRequestPath), null,
+            manifest.PlatformBuildRef, registry.RegistryRevision, registry.RegistryHash, disposition,
+            entry.ExpectedAvailability, null, null, entry.ContentOrigin, "independent-platform-registry",
+            evidence.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+            entry.HandlerOrArtifactType, entry.ExpectedAvailability);
+    }
+
+    private static void AddEvidence(ICollection<string> evidence, string label, params string[] values)
+    {
+        var material = string.Join('@', values.Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (!string.IsNullOrWhiteSpace(material)) evidence.Add(label + ":" + material);
     }
 
     private static AspxReferenceObservation Finalize(AspxReferenceCandidate candidate,
