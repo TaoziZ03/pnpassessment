@@ -148,8 +148,7 @@ internal sealed record AspxPlatformRegistryV1(
         !string.IsNullOrWhiteSpace(AuthorityKind) && !string.IsNullOrWhiteSpace(AuthoritySourceRef) &&
         IsHash(AuthorityArtifactHash) && !string.IsNullOrWhiteSpace(ReviewRef) &&
         !string.IsNullOrWhiteSpace(PlatformFamily) && !string.IsNullOrWhiteSpace(platformBuildRef) &&
-        string.Equals(platformBuildRef, PlatformBuildMin, StringComparison.Ordinal) &&
-        string.Equals(platformBuildRef, PlatformBuildMax, StringComparison.Ordinal) &&
+        AspxPlatformRegistryV1BuildRange.IsValidMetadata(PlatformBuildMin, PlatformBuildMax) &&
         EntryCount == (Entries?.Count ?? 0);
 
     internal IReadOnlyList<string> Validate(string platformBuildRef)
@@ -261,9 +260,18 @@ internal sealed record AspxReviewedNotApplicableRule(
 
 internal static class AspxPlatformRegistryV1BuildRange
 {
+    internal static bool IsValidMetadata(string minimum, string maximum)
+    {
+        if (string.IsNullOrWhiteSpace(minimum) || string.IsNullOrWhiteSpace(maximum)) return false;
+        if (minimum == "*" || maximum == "*") return minimum == "*" && maximum == "*";
+        if (Version.TryParse(minimum, out var min) && Version.TryParse(maximum, out var max))
+            return min <= max;
+        return string.Compare(minimum, maximum, StringComparison.OrdinalIgnoreCase) <= 0;
+    }
+
     internal static bool Contains(string value, string minimum, string maximum)
     {
-        if (string.IsNullOrWhiteSpace(value) || string.IsNullOrWhiteSpace(minimum) || string.IsNullOrWhiteSpace(maximum))
+        if (string.IsNullOrWhiteSpace(value) || !IsValidMetadata(minimum, maximum))
             return false;
         if (minimum == "*" && maximum == "*") return true;
         if (Version.TryParse(value, out var parsed) && Version.TryParse(minimum, out var min) &&

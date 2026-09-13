@@ -24,12 +24,42 @@ internal sealed record AspxReviewedPlatformRegistryProfile(
     string CompatibilityDecisionRef,
     string PlatformFamily,
     string PlatformBuild,
+    string AuthorityFingerprint,
+    string EntryIdentityHash,
     int EntryCount);
+
+internal sealed record AspxPlatformRegistryAdmissionIdentity(
+    string RegistrySchemaVersion,
+    string RegistryRevision,
+    string RegistryCanonicalHash,
+    string RegistryFileSha256,
+    string AuthorityFingerprint,
+    string EntryIdentityHash);
+
+internal sealed record AspxPlatformRegistryCompatibilityRevocation(
+    string RegistryRevision,
+    string RegistryCanonicalHash,
+    string AuthorityFingerprint,
+    string DecisionRef,
+    string Reason)
+{
+    internal bool IsValid() => !string.IsNullOrWhiteSpace(RegistryRevision) &&
+        IsHash(RegistryCanonicalHash) && IsHash(AuthorityFingerprint) &&
+        !string.IsNullOrWhiteSpace(DecisionRef) && !string.IsNullOrWhiteSpace(Reason);
+
+    internal bool Matches(AspxPlatformRegistryAdmissionIdentity identity) => identity != null &&
+        string.Equals(RegistryRevision, identity.RegistryRevision, StringComparison.Ordinal) &&
+        string.Equals(RegistryCanonicalHash, identity.RegistryCanonicalHash, StringComparison.Ordinal) &&
+        string.Equals(AuthorityFingerprint, identity.AuthorityFingerprint, StringComparison.Ordinal);
+
+    private static bool IsHash(string value) => value?.Length == 64 && value.All(Uri.IsHexDigit) &&
+        string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal);
+}
 
 internal static class AspxReviewedPlatformRegistryProfiles
 {
     internal static readonly AspxReviewedPlatformRegistryProfile SpoOnline2770912001 = new(
-        "assessment-aspx-registry-authority/ccd-845-r1",
+        "assessment-aspx-registry-authority/ccd-746-r2",
         "CCD-835",
         "PnP.Scanning.Core.Discovery.RegistryAuthority.spo-online-16.0.27709.12001.registry.schema.json",
         "urn:ccd:pnp:aspx-platform-registry:spo-online-16.0.27709.12001:r1",
@@ -46,69 +76,106 @@ internal static class AspxReviewedPlatformRegistryProfiles
         "CCD-411:approve_with_changes",
         "SharePointOnline-16",
         "16.0.27709.12001",
+        "1ed587eb58c40ef961e58b4b97ac5a3a7e475e444ba5df9dad05da4e578cb80c",
+        "2c511a8f90fd6b6aa7a56dd6e9417e08d0f598c2ce3ff4d96e33b25e5f98cff7",
         1161);
 
-    internal static bool TryGet(string platformBuild, out AspxReviewedPlatformRegistryProfile profile)
+    private static readonly IReadOnlyList<AspxReviewedPlatformRegistryProfile> Admitted =
+        new[] { SpoOnline2770912001 };
+
+    internal static readonly IReadOnlyList<AspxPlatformRegistryCompatibilityRevocation>
+        CompatibilityRevocations = Array.Empty<AspxPlatformRegistryCompatibilityRevocation>();
+
+    internal static bool TryGet(AspxPlatformRegistryAdmissionIdentity identity,
+        out AspxReviewedPlatformRegistryProfile profile)
     {
-        profile = string.Equals(platformBuild, SpoOnline2770912001.PlatformBuild, StringComparison.Ordinal)
-            ? SpoOnline2770912001 : null;
+        profile = Admitted.SingleOrDefault(candidate =>
+            string.Equals(identity?.RegistrySchemaVersion, candidate.RegistrySchemaVersion,
+                StringComparison.Ordinal) &&
+            string.Equals(identity.RegistryRevision, candidate.RegistryRevision, StringComparison.Ordinal) &&
+            string.Equals(identity.RegistryCanonicalHash, candidate.RegistryCanonicalHash,
+                StringComparison.Ordinal) &&
+            string.Equals(identity.RegistryFileSha256, candidate.RegistryFileSha256, StringComparison.Ordinal) &&
+            string.Equals(identity.AuthorityFingerprint, candidate.AuthorityFingerprint,
+                StringComparison.Ordinal) &&
+            string.Equals(identity.EntryIdentityHash, candidate.EntryIdentityHash, StringComparison.Ordinal));
         return profile != null;
     }
+
+    internal static AspxReviewedPlatformRegistryProfile DiagnosticCandidate(
+        AspxPlatformRegistryAdmissionIdentity identity) =>
+        Admitted.FirstOrDefault(candidate => string.Equals(identity?.RegistryRevision,
+            candidate.RegistryRevision, StringComparison.Ordinal)) ?? Admitted.SingleOrDefault();
 }
 
 internal static class AspxPlatformRegistryAuthorityGate
 {
     internal static async Task<AspxPlatformRegistryV1> ReadAndValidateAsync(string registryPath,
-        string platformBuild, CancellationToken cancellationToken = default)
+        string platformBuild, CancellationToken cancellationToken = default,
+        IReadOnlyList<AspxPlatformRegistryCompatibilityRevocation> compatibilityRevocations = null,
+        Action<string> warningSink = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(registryPath);
         var bytes = await File.ReadAllBytesAsync(registryPath, cancellationToken).ConfigureAwait(false);
-        var result = Validate(bytes, platformBuild);
+        var result = Validate(bytes, platformBuild, compatibilityRevocations);
         if (result.Errors.Count > 0)
             throw new InvalidOperationException("Independent registry authority gate rejected the input before authentication/network: " +
                 string.Join(", ", result.Errors));
+        foreach (var warning in result.Warnings) warningSink?.Invoke(warning);
         return result.Registry;
     }
 
     internal static async Task<T> ExecuteThenAsync<T>(string registryPath, string platformBuild,
         Func<AspxPlatformRegistryV1, CancellationToken, Task<T>> authorizedContinuation,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<AspxPlatformRegistryCompatibilityRevocation> compatibilityRevocations = null,
+        Action<string> warningSink = null)
     {
         ArgumentNullException.ThrowIfNull(authorizedContinuation);
-        var registry = await ReadAndValidateAsync(registryPath, platformBuild, cancellationToken)
+        var registry = await ReadAndValidateAsync(registryPath, platformBuild, cancellationToken,
+                compatibilityRevocations, warningSink)
             .ConfigureAwait(false);
         return await authorizedContinuation(registry, cancellationToken).ConfigureAwait(false);
     }
 
     internal static AspxPlatformRegistryGateResult Validate(ReadOnlyMemory<byte> registryBytes,
-        string platformBuild)
+        string platformBuild,
+        IReadOnlyList<AspxPlatformRegistryCompatibilityRevocation> compatibilityRevocations = null)
     {
         var errors = new List<string>();
-        if (!AspxReviewedPlatformRegistryProfiles.TryGet(platformBuild, out var profile))
-            return new(null, null, null, new[] { "reviewed_profile_missing_for_exact_build" });
-
-        var schemaBytes = ReadEmbeddedSchema(profile, errors);
+        var warnings = new List<string>();
         JsonDocument registryDocument = null;
         JsonDocument schemaDocument = null;
         try
         {
             registryDocument = ParseStrict(registryBytes, "registry_json_invalid", errors);
-            if (schemaBytes != null)
-                schemaDocument = ParseStrict(schemaBytes, "reviewed_schema_json_invalid", errors);
-            if (registryDocument == null || schemaDocument == null)
-                return new(null, profile, null, errors);
+            if (registryDocument == null)
+                return new(null, null, null, errors, warnings);
 
             JsonDuplicatePropertyValidator.Validate(registryDocument.RootElement, "$", errors);
-            JsonDuplicatePropertyValidator.Validate(schemaDocument.RootElement, "$schema", errors);
-            JsonSchemaSubsetValidator.Validate(registryDocument.RootElement, schemaDocument.RootElement, errors);
-
             var fileHash = Sha256(registryBytes.Span);
-            if (!string.Equals(fileHash, profile.RegistryFileSha256, StringComparison.Ordinal))
-                errors.Add("registry_file_hash_not_reviewed");
-
             var canonicalBytes = CanonicalJson.SerializeWithoutRootProperty(
                 registryDocument.RootElement, "registryHash");
             var canonicalHash = Sha256(canonicalBytes);
+            var identity = CreateAdmissionIdentity(registryDocument.RootElement, canonicalHash, fileHash);
+            var admitted = AspxReviewedPlatformRegistryProfiles.TryGet(identity, out var profile);
+            profile ??= AspxReviewedPlatformRegistryProfiles.DiagnosticCandidate(identity);
+            if (!admitted) errors.Add("reviewed_profile_missing_for_registry_identity");
+            if (profile == null)
+                return new(null, null, canonicalHash, errors, warnings);
+
+            var schemaBytes = ReadEmbeddedSchema(profile, errors);
+            if (schemaBytes != null)
+                schemaDocument = ParseStrict(schemaBytes, "reviewed_schema_json_invalid", errors);
+            if (schemaDocument == null)
+                return new(null, profile, canonicalHash, errors, warnings);
+
+            JsonDuplicatePropertyValidator.Validate(schemaDocument.RootElement, "$schema", errors);
+            JsonSchemaSubsetValidator.Validate(registryDocument.RootElement, schemaDocument.RootElement, errors);
+
+            if (!string.Equals(fileHash, profile.RegistryFileSha256, StringComparison.Ordinal))
+                errors.Add("registry_file_hash_not_reviewed");
+
             ExpectString(registryDocument.RootElement, "$schema", profile.SchemaRelativePath, errors);
             ExpectString(registryDocument.RootElement, "registrySchemaVersion", profile.RegistrySchemaVersion, errors);
             ExpectString(registryDocument.RootElement, "registryRevision", profile.RegistryRevision, errors);
@@ -126,6 +193,25 @@ internal static class AspxPlatformRegistryAuthorityGate
             ExpectInteger(registryDocument.RootElement, "entryCount", profile.EntryCount, errors);
             if (!string.Equals(canonicalHash, profile.RegistryCanonicalHash, StringComparison.Ordinal))
                 errors.Add("registry_canonical_hash_not_reviewed");
+            if (!string.Equals(identity.AuthorityFingerprint, profile.AuthorityFingerprint,
+                    StringComparison.Ordinal))
+                errors.Add("registry_authority_fingerprint_not_reviewed");
+            if (!string.Equals(identity.EntryIdentityHash, profile.EntryIdentityHash,
+                    StringComparison.Ordinal))
+                errors.Add("registry_entry_identity_hash_not_reviewed");
+
+            var revocations = compatibilityRevocations ??
+                AspxReviewedPlatformRegistryProfiles.CompatibilityRevocations;
+            foreach (var revocation in revocations)
+            {
+                if (!revocation.IsValid()) errors.Add("registry_compatibility_revocation_invalid");
+                else if (revocation.Matches(identity))
+                    errors.Add("registry_compatibility_revoked:" + revocation.DecisionRef);
+            }
+
+            if (string.IsNullOrWhiteSpace(platformBuild)) errors.Add("observed_platform_build_missing");
+            else if (!string.Equals(platformBuild, profile.PlatformBuild, StringComparison.Ordinal))
+                warnings.Add("observed_platform_build_differs_from_registry_metadata");
 
             AspxPlatformRegistryV1 registry = null;
             try
@@ -141,7 +227,9 @@ internal static class AspxPlatformRegistryAuthorityGate
                 errors.Add("registry_typed_document_missing");
             else
                 foreach (var invalid in registry.Validate(platformBuild)) errors.Add("registry:" + invalid);
-            return new(registry, profile, canonicalHash, errors.Distinct(StringComparer.Ordinal).ToArray());
+            return new(registry, profile, canonicalHash,
+                errors.Distinct(StringComparer.Ordinal).ToArray(),
+                warnings.Distinct(StringComparer.Ordinal).ToArray());
         }
         finally
         {
@@ -149,6 +237,26 @@ internal static class AspxPlatformRegistryAuthorityGate
             schemaDocument?.Dispose();
         }
     }
+
+    private static AspxPlatformRegistryAdmissionIdentity CreateAdmissionIdentity(JsonElement root,
+        string canonicalHash, string fileHash)
+    {
+        var authorityFingerprint = Sha256(Encoding.UTF8.GetBytes(string.Join('\n',
+            StringProperty(root, "authorityKind"), StringProperty(root, "authoritySourceRef"),
+            StringProperty(root, "authorityArtifactHash"))));
+        var entryIdentities = root.TryGetProperty("entries", out var entries) &&
+                              entries.ValueKind == JsonValueKind.Array
+            ? entries.EnumerateArray().Select(entry => StringProperty(entry, "referenceId"))
+                .OrderBy(value => value, StringComparer.Ordinal).ToArray()
+            : Array.Empty<string>();
+        var entryIdentityHash = Sha256(Encoding.UTF8.GetBytes(string.Join('\n', entryIdentities)));
+        return new(StringProperty(root, "registrySchemaVersion"), StringProperty(root, "registryRevision"),
+            canonicalHash, fileHash, authorityFingerprint, entryIdentityHash);
+    }
+
+    private static string StringProperty(JsonElement root, string propertyName) =>
+        root.ValueKind == JsonValueKind.Object && root.TryGetProperty(propertyName, out var value) &&
+        value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : string.Empty;
 
     private static byte[] ReadEmbeddedSchema(AspxReviewedPlatformRegistryProfile profile,
         ICollection<string> errors)
@@ -214,7 +322,8 @@ internal sealed record AspxPlatformRegistryGateResult(
     AspxPlatformRegistryV1 Registry,
     AspxReviewedPlatformRegistryProfile Profile,
     string CanonicalHash,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    IReadOnlyList<string> Warnings);
 
 internal static class JsonDuplicatePropertyValidator
 {

@@ -108,9 +108,9 @@ public sealed class AspxAcquisitionV3Tests
     }
 
     [Fact]
-    public void R1_R5_registry_build_drift_alias_and_runtime_counterexamples_are_unknown()
+    public void R1_R5_registry_metadata_alias_and_runtime_counterexamples_are_unknown()
     {
-        Registry(min: "16.0.1", max: "16.0.2").Validate("unknown-build").Should().NotBeEmpty(); // R1
+        Registry(min: "16.0.2", max: "16.0.1").Validate("unknown-build").Should().NotBeEmpty(); // R1
 
         var physical = Physical();
         var manifest = ReferenceManifest() with { RegistryHash = HashB };
@@ -131,16 +131,17 @@ public sealed class AspxAcquisitionV3Tests
             .Should().Be(AspxAggregateVerdict.Unknown); // R4
 
         AspxAggregateEvaluator.Evaluate(physical, reference, ReferenceManifest(),
-            Registry(min: "17.0.0", max: "17.0.1"), out _).Should().Be(AspxAggregateVerdict.Unknown); // R5
+            Registry(min: "17.0.1", max: "17.0.0"), out _).Should().Be(AspxAggregateVerdict.Unknown); // R5
     }
 
     [Fact]
-    public async Task Official_registry_bytes_pass_exact_schema_digest_authority_and_build_gate()
+    public async Task Official_registry_bytes_pass_reviewed_identity_gate_and_exact_build_has_no_warning()
     {
         var bytes = await File.ReadAllBytesAsync(OfficialRegistryPath());
         var result = AspxPlatformRegistryAuthorityGate.Validate(bytes, OfficialProfile.PlatformBuild);
 
         result.Errors.Should().BeEmpty();
+        result.Warnings.Should().BeEmpty();
         result.CanonicalHash.Should().Be(OfficialProfile.RegistryCanonicalHash);
         result.Registry.RegistryRevision.Should().Be(OfficialProfile.RegistryRevision);
         result.Registry.RegistryHash.Should().Be(OfficialProfile.RegistryCanonicalHash);
@@ -162,10 +163,61 @@ public sealed class AspxAcquisitionV3Tests
         continuationCalls.Should().Be(1);
     }
 
-    [Fact]
-    public async Task Exact_registry_gate_rejects_schema_pin_range_revision_hash_authority_and_build_drift_before_callback()
+    [Theory]
+    [InlineData("16.0.27709.12000")]
+    [InlineData("16.0.27709.12002")]
+    [InlineData("16.0.27711.12757")]
+    [InlineData("unknown-build")]
+    public async Task Same_admitted_registry_passes_across_observed_farm_builds_with_warning(
+        string observedPlatformBuild)
     {
-        var exact = await File.ReadAllBytesAsync(OfficialRegistryPath());
+        var bytes = await File.ReadAllBytesAsync(OfficialRegistryPath());
+        var result = AspxPlatformRegistryAuthorityGate.Validate(bytes, observedPlatformBuild);
+
+        result.Errors.Should().BeEmpty();
+        result.Warnings.Should().Equal("observed_platform_build_differs_from_registry_metadata");
+        result.Profile.Should().BeSameAs(OfficialProfile);
+
+        var continuationCalls = 0;
+        var warnings = new List<string>();
+        var accepted = await AspxPlatformRegistryAuthorityGate.ExecuteThenAsync(
+            OfficialRegistryPath(), observedPlatformBuild, (registry, _) =>
+            {
+                continuationCalls++;
+                return Task.FromResult(registry.EntryCount);
+            }, warningSink: warnings.Add);
+        accepted.Should().Be(1161);
+        continuationCalls.Should().Be(1);
+        warnings.Should().Equal("observed_platform_build_differs_from_registry_metadata");
+    }
+
+    [Fact]
+    public async Task Explicit_registry_compatibility_revocation_rejects_before_callback()
+    {
+        var bytes = await File.ReadAllBytesAsync(OfficialRegistryPath());
+        var revocation = new AspxPlatformRegistryCompatibilityRevocation(
+            OfficialProfile.RegistryRevision, OfficialProfile.RegistryCanonicalHash,
+            OfficialProfile.AuthorityFingerprint, "Board-test-revocation", "Independent incompatibility observed.");
+        var result = AspxPlatformRegistryAuthorityGate.Validate(bytes, "16.0.27711.12757",
+            new[] { revocation });
+
+        result.Errors.Should().Contain("registry_compatibility_revoked:Board-test-revocation");
+
+        var continuationCalls = 0;
+        var action = () => AspxPlatformRegistryAuthorityGate.ExecuteThenAsync(
+            OfficialRegistryPath(), "16.0.27711.12757", (_, _) =>
+            {
+                continuationCalls++;
+                return Task.FromResult(0);
+            }, compatibilityRevocations: new[] { revocation });
+        await action.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*before authentication/network*");
+        continuationCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Registry_gate_rejects_schema_pin_range_revision_hash_authority_entry_and_content_drift_before_callback()
+    {
         var cases = new (string Name, byte[] Bytes, string Build, string Expected)[]
         {
             ("unknown field", MutateOfficial(root => root["unreviewedField"] = true),
@@ -184,6 +236,9 @@ public sealed class AspxAcquisitionV3Tests
             ("authority drift", MutateOfficial(root => root["authoritySourceRef"] =
                 "1111111111111111111111111111111111111111"), OfficialProfile.PlatformBuild,
                 "reviewed_pin_mismatch:authoritySourceRef"),
+            ("entry identity drift", MutateOfficial(root => root["entries"]![0]!["referenceId"] =
+                "future-entry-identity"), OfficialProfile.PlatformBuild,
+                "registry_entry_identity_hash_not_reviewed"),
             ("schema locator drift", MutateOfficial(root => root["$schema"] = "../schema/future.schema.json"),
                 OfficialProfile.PlatformBuild, "schema_const:$.$schema"),
             ("unknown disposition", MutateOfficial(root =>
@@ -192,9 +247,6 @@ public sealed class AspxAcquisitionV3Tests
             ("self-consistent rehash", MutateOfficial(root =>
                 root["registryRevision"] = "spo-online-16.0.27709.12001-r2", rehash: true),
                 OfficialProfile.PlatformBuild, "registry_canonical_hash_not_reviewed"),
-            ("prior build", exact, "16.0.27709.12000", "reviewed_profile_missing_for_exact_build"),
-            ("future build", exact, "16.0.27709.12002", "reviewed_profile_missing_for_exact_build"),
-            ("unknown build", exact, "unknown-build", "reviewed_profile_missing_for_exact_build"),
         };
 
         foreach (var testCase in cases)

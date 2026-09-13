@@ -66,7 +66,8 @@ internal static class AspxAcquisitionCommandDefinition
         var referenceOutput = RequiredOutput("--reference-output", "aspx-reference-output/v2 path.");
         var aggregateOutput = RequiredOutput("--aggregate-output", "aspx-acquisition-verdict/v2 path.");
         var terminalReceipt = RequiredOutput("--terminal-receipt", "aspx-acquisition-terminal-receipt/v1 path.");
-        var platformBuild = RequiredString("--platform-build", "Observed SharePoint platform build bound to the registry.");
+        var platformBuild = RequiredString("--platform-build",
+            "Observed SharePoint platform build telemetry; registry admission is bound to reviewed registry identity, not this value.");
         var snapshotFence = RequiredString("--snapshot-fence", "Immutable acquisition snapshot/as-of fence.");
         var permissionContext = RequiredString("--permission-context", "Non-secret effective identity/permission context label.");
         var visibilityBoundary = RequiredString("--visibility-boundary", "Authorized visibility boundary proven by this run.");
@@ -249,7 +250,9 @@ internal sealed class AspxAcquisitionCommandHandler
                             options.PlatformBuild, options.SnapshotFence, registry, options.ResumeRunId,
                             options.ResumeRunId == null ? artifactRunId : null), gateCancellationToken)
                         .ConfigureAwait(false);
-                }, cancellationToken).ConfigureAwait(false);
+                }, cancellationToken, warningSink: warning =>
+                    AnsiConsole.MarkupLine($"[yellow]ASPX registry admission warning: {Markup.Escape(warning)}; observedPlatformBuild={Markup.Escape(options.PlatformBuild)}[/]"))
+                .ConfigureAwait(false);
             aggregate = result.Aggregate;
             exitCode = 0;
             completionState = "Succeeded";
