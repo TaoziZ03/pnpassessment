@@ -20,18 +20,12 @@ namespace PnP.Scanning.Core.Scanners
 
         internal ClassicOptions Options { get; set; }
 
-        internal async override Task ExecuteAsync()
+        internal static PnPContextOptions CreateContextOptions(ClassicOptions scanOptions)
         {
-            Logger.Information("Starting Classic assessment of web {SiteUrl}{WebUrl}", SiteUrl, WebUrl);
-
-            // Define extra Web/Site data that we want to load when the context is inialized
-            // This will not require extra server roundtrips
+            // Load component metadata with the context initialization requests.
             PnPContextOptions options = new()
             {
-                AdditionalSitePropertiesOnCreate = new Expression<Func<ISite, object>>[]
-                {
-                    w => w.RootWeb.QueryProperties(p => p.ContentTypes.QueryProperties(p => p.StringId, p => p.Name))
-                },
+                AdditionalSitePropertiesOnCreate = Array.Empty<Expression<Func<ISite, object>>>(),
                 AdditionalWebPropertiesOnCreate = new Expression<Func<IWeb, object>>[]
                 {   
                     w => w.LastItemUserModifiedDate,                 
@@ -51,14 +45,24 @@ namespace PnP.Scanning.Core.Scanners
                 }
             };
 
-            if (Options.Pages)
+            // Only WorkflowScanComponent reads the root web's content types. Expanding
+            // Site.RootWeb unnecessarily can fail the entire context before Pages runs.
+            if (scanOptions.Workflow)
+            {
+                options.AdditionalSitePropertiesOnCreate = options.AdditionalSitePropertiesOnCreate.Union(new Expression<Func<ISite, object>>[]
+                {
+                    w => w.RootWeb.QueryProperties(p => p.ContentTypes.QueryProperties(p => p.StringId, p => p.Name))
+                });
+            }
+
+            if (scanOptions.Pages)
             {
                 // Also load site/web feature collections
                 options.AdditionalSitePropertiesOnCreate = options.AdditionalSitePropertiesOnCreate.Union(new Expression<Func<ISite, object>>[] { w => w.Features.QueryProperties(p => p.DefinitionId) });
                 options.AdditionalWebPropertiesOnCreate = options.AdditionalWebPropertiesOnCreate.Union(new Expression<Func<IWeb, object>>[] { w => w.Features.QueryProperties(p => p.DefinitionId) });
             }
 
-            if (Options.Extensibility)
+            if (scanOptions.Extensibility)
             {
                 options.AdditionalSitePropertiesOnCreate = options.AdditionalSitePropertiesOnCreate.Union(new Expression<Func<ISite, object>>[] { w => w.UserCustomActions });
                 options.AdditionalWebPropertiesOnCreate = options.AdditionalWebPropertiesOnCreate.Union(new Expression<Func<IWeb, object>>[] { w => w.UserCustomActions,
@@ -67,7 +71,14 @@ namespace PnP.Scanning.Core.Scanners
                                                                                                                                                w => w.MasterUrl });
             }
 
-            using (var context = await GetPnPContextAsync(options))
+            return options;
+        }
+
+        internal async override Task ExecuteAsync()
+        {
+            Logger.Information("Starting Classic assessment of web {SiteUrl}{WebUrl}", SiteUrl, WebUrl);
+
+            using (var context = await GetPnPContextAsync(CreateContextOptions(Options)))
             using (var csomContext = GetClientContext(context))
             {
                 if (Options.Workflow)
@@ -349,6 +360,13 @@ namespace PnP.Scanning.Core.Scanners
 
         private static void AddClassicSiteCollection(ScanContext dbContext, HashSet<string> webTemplates, HashSet<string> remediationCodes, ClassicSiteSummary classicSiteCollection)
         {
+            // No summary exists when every web failed before collection. Preserve the
+            // failed web records without inventing a successful empty site summary.
+            if (classicSiteCollection == null)
+            {
+                return;
+            }
+
             // Get the unique list of sub web templates
             if (webTemplates.Count > 0)
             {
