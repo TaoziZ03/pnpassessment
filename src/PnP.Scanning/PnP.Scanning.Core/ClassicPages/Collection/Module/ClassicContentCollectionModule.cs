@@ -23,18 +23,24 @@ internal sealed class ClassicContentCollectionModule(
     Func<CollectionContext, CancellationToken, Task<IClassicContentReader>>? online = null)
     : ICollectionModule, ICollectionSnapshotValidator
 {
+    internal const string FindingSites = "Finding sites";
+    internal const string ReadingSites = "Reading sites";
+    internal const string ReadingUsage = "Reading usage data";
     private Guid assessmentId;
     public string ModuleKey => ClassicPageModule.Key;
     public string InputVersion => ClassicPageModule.InputVersion;
 
     /// <summary>
     /// Freezes typed Web scopes, then acquires each Web's file inventory, file enrichment, selected items, and audit receipts.
+    /// Reports site collections expanded, then Webs read out of the frozen total, as live progress.
     /// </summary>
     public async IAsyncEnumerable<CollectionRecord> CollectAsync(
         CollectionContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         assessmentId = context.AssessmentId;
+        Action<PhaseProgress>? report = context.Progress;
+        report?.Invoke(new(FindingSites));
         AcquisitionJournal journal = new(context);
         await journal.InitializeAsync(cancellationToken);
         await using IClassicContentReader reader = online == null
@@ -47,6 +53,7 @@ internal sealed class ClassicContentCollectionModule(
             cancellationToken);
         List<SiteCollectionScope> siteCollections = [];
         List<WebScope> webScopes = [];
+        int siteCollectionsRead = 0;
         foreach (string siteCollectionUrl in selection.SiteCollectionUrls)
         {
             SiteCollectionScope siteScope = await journal.ReadOrAcquireAsync(
@@ -63,6 +70,8 @@ internal sealed class ClassicContentCollectionModule(
                 throw new SnapshotIntegrityException("A Web scope belongs to a different site collection.");
             siteCollections.Add(siteScope);
             webScopes.AddRange(siteScope.Webs);
+            report?.Invoke(
+                new(FindingSites, ++siteCollectionsRead, selection.SiteCollectionUrls.Length, "site collections"));
         }
 
         ClassicCollectionScope scope = selection with { SiteCollections = siteCollections.ToArray() };
@@ -71,8 +80,17 @@ internal sealed class ClassicContentCollectionModule(
             "assessment",
             () => Task.FromResult(scope),
             cancellationToken);
+        int websTotal = webScopes.Count;
+        int websRead = 0;
+        object progressGate = new();
+        report?.Invoke(new(ReadingSites, 0, websTotal, "webs"));
         ActionBlock<WebScope> workers = new(
-            webScope => CollectWebAsync(webScope, scope, reader, journal, cancellationToken),
+            async webScope =>
+            {
+                await CollectWebAsync(webScope, scope, reader, journal, cancellationToken);
+                // Count and report under one lock so parallel Webs never publish a lower count after a higher one.
+                lock (progressGate) report?.Invoke(new(ReadingSites, ++websRead, websTotal, "webs"));
+            },
             new ExecutionDataflowBlockOptions
             {
                 CancellationToken = cancellationToken,
@@ -91,7 +109,12 @@ internal sealed class ClassicContentCollectionModule(
             await workers.Completion;
         }
 
-        if (!scope.Options.SkipUsageInformation) await reader.CollectAuditAsync(scope, journal, cancellationToken);
+        if (!scope.Options.SkipUsageInformation)
+        {
+            report?.Invoke(new(ReadingUsage));
+            await reader.CollectAuditAsync(scope, journal, cancellationToken);
+        }
+
         yield return new(null, VersionedJson.From(new { stage = "ClassicObjectCollectionComplete" }));
     }
 
