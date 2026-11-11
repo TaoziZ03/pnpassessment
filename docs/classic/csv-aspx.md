@@ -38,4 +38,4 @@ Within captured typed item-field JSON, an omitted optional user/lookup property 
 
 [classicpages.csv](csv-classicpages.md) contains the selected union of qualifying physical ASPX Pages and independent Posts items. [discovery.csv](csv-discovery.md) records physical-file discovery, references, scopes, pagination, gaps and coverage.
 
-The intended Power BI ASPX tab uses all rows from `aspx.csv` before an explicit user-selected visual filter. This revision retains the existing PBIT assets; the matching ASPX tab layout remains a separate report-template update.
+The Power BI ASPX tab shows all rows from `aspx.csv`; its slicers are the reader's own filters. Its Category column places each file in one group: `Classic page` for the files selected into [classicpages.csv](csv-classicpages.md), and `List view or form`, `Modern page`, `Other handler`, `Handler not read` or `Script blocked (NoExecute)` for the files that stay on the ASPX tab only.

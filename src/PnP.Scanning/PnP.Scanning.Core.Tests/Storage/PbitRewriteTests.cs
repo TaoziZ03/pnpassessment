@@ -131,6 +131,66 @@ namespace PnP.Scanning.Core.Tests.Storage
             }
         }
 
+        /// <summary>The ASPX tab reads the physical inventory as UTF-8, keeps quoted line breaks and decodes the null token.</summary>
+        [Fact]
+        public void ClassicTemplate_Aspx_ReadsPhysicalInventoryCsv()
+        {
+            using var document = ReadEmbeddedClassicTemplate();
+            var lines = GetQueryLines(GetClassicTable(document, "aspx")).ToArray();
+            var source = lines.Single(line => line.Contains("Csv.Document(", StringComparison.Ordinal));
+
+            source.Should().Contain("aspx.csv").And.Contain("Encoding=65001");
+            source.Should().MatchRegex(@"QuoteStyle\s*=\s*QuoteStyle\.Csv");
+            lines.Any(line => line.Contains("\"\\N\",null", StringComparison.Ordinal)).Should().BeTrue();
+        }
+
+        /// <summary>The Pages tab reads the audit usage counts from the supported page CSV as whole numbers.</summary>
+        [Theory]
+        [InlineData("AuditViewsCount")]
+        [InlineData("AuditUniqueUsers")]
+        public void ClassicTemplate_ClassicPages_LoadsAuditUsage(string columnName)
+        {
+            using var document = ReadEmbeddedClassicTemplate();
+            var table = GetClassicTable(document, "classicpages");
+            var column = table.GetProperty("columns")
+                .EnumerateArray()
+                .Single(value => value.GetProperty("name").GetString() == columnName);
+
+            column.GetProperty("dataType").GetString().Should().Be("int64");
+            GetQueryLines(table)
+                .Any(line => line.Contains($"{{\"{columnName}\", Int64.Type}}", StringComparison.Ordinal))
+                .Should()
+                .BeTrue();
+        }
+
+        /// <summary>The report has an ASPX tab, and its Pages table shows audit usage in place of the remediation code.</summary>
+        [Fact]
+        public void ClassicTemplate_Layout_HasAspxTabAndPagesAuditColumns()
+        {
+            const string resourceName = "PnP.Scanning.Core.Scanners.Classic.ClassicAssessmentReport.pbit";
+            using var pbit = typeof(ReportManager).Assembly.GetManifestResourceStream(resourceName);
+            pbit.Should().NotBeNull();
+            using var archive = new ZipArchive(pbit, ZipArchiveMode.Read);
+            var entry = archive.GetEntry("Report/Layout");
+            entry.Should().NotBeNull();
+            using var reader = new StreamReader(entry.Open(), Encoding.Unicode);
+            using var layout = JsonDocument.Parse(reader.ReadToEnd());
+
+            var sections = layout.RootElement.GetProperty("sections").EnumerateArray().ToArray();
+            sections.Select(section => section.GetProperty("displayName").GetString()).Should().Contain("ASPX");
+            var pages = sections.Single(section => section.GetProperty("displayName").GetString() == "Pages");
+            var visuals = string.Concat(
+                pages.GetProperty("visualContainers")
+                    .EnumerateArray()
+                    .Select(visual => visual.GetProperty("config").GetString()));
+
+            visuals.Should()
+                .Contain("classicpages.AuditViewsCount")
+                .And.Contain("classicpages.AuditUniqueUsers")
+                .And.Contain("MC1464926")
+                .And.NotContain("RemediationCode");
+        }
+
         [Fact]
         public void RewriteDataLocationsInPbit_NewCsvSources_PathsRewritten()
         {
