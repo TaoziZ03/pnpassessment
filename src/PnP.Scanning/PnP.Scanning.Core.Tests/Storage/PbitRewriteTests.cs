@@ -74,6 +74,12 @@ namespace PnP.Scanning.Core.Tests.Storage
         [InlineData("webs", "StartDate")]
         [InlineData("webs", "EndDate")]
         [InlineData("classicpages", "ModifiedAt")]
+        [InlineData("classiclists", "LastModifiedAt")]
+        [InlineData("workflows", "LastSubscriptionEdit")]
+        [InlineData("workflows", "LastDefinitionEdit")]
+        [InlineData("classicinfopath", "LastItemUserModifiedDate")]
+        [InlineData("classicwebsummaries", "LastItemUserModifiedDate")]
+        [InlineData("classicsitesummaries", "LastItemUserModifiedDate")]
         public void ClassicTemplate_StandardDateColumns_ParseWithExplicitCulture(string tableName, string columnName)
         {
             using var document = ReadEmbeddedClassicTemplate();
@@ -164,23 +170,67 @@ namespace PnP.Scanning.Core.Tests.Storage
                 .BeTrue();
         }
 
-        /// <summary>An empty modified date in classicpages.csv becomes a blank before the date conversion.</summary>
-        [Fact]
-        public void ClassicTemplate_ClassicPages_ReadsEmptyModifiedAtAsBlank()
+        /// <summary>An empty date in a classic CSV becomes a blank before the date conversion.</summary>
+        [Theory]
+        [InlineData("classicpages", "ModifiedAt")]
+        [InlineData("classiclists", "LastModifiedAt")]
+        [InlineData("workflows", "LastSubscriptionEdit")]
+        [InlineData("workflows", "LastDefinitionEdit")]
+        [InlineData("classicinfopath", "LastItemUserModifiedDate")]
+        [InlineData("classicwebsummaries", "LastItemUserModifiedDate")]
+        [InlineData("classicsitesummaries", "LastItemUserModifiedDate")]
+        public void ClassicTemplate_DateColumns_ReadEmptyValueAsBlank(string tableName, string columnName)
         {
             using var document = ReadEmbeddedClassicTemplate();
-            var lines = GetQueryLines(GetClassicTable(document, "classicpages")).ToArray();
+            var lines = GetQueryLines(GetClassicTable(document, tableName)).ToArray();
             var blanks = Array.FindIndex(
                 lines,
                 line => line.Contains("Table.ReplaceValue(", StringComparison.Ordinal) &&
                         line.Contains("\"\",null", StringComparison.Ordinal) &&
-                        line.Contains("\"ModifiedAt\"", StringComparison.Ordinal));
+                        line.Contains($"\"{columnName}\"", StringComparison.Ordinal));
             var conversion = Array.FindIndex(
                 lines,
-                line => line.Contains("{\"ModifiedAt\", type datetime}", StringComparison.Ordinal));
+                line => line.Contains($"{{\"{columnName}\", type datetime}}", StringComparison.Ordinal));
 
             blanks.Should().NotBe(-1);
             conversion.Should().BeGreaterThan(blanks);
+        }
+
+        /// <summary>Every date/time column of the model receives its values from a date conversion in the table's query.</summary>
+        [Fact]
+        public void ClassicTemplate_AllDateColumns_AreConvertedInTheirQuery()
+        {
+            using var document = ReadEmbeddedClassicTemplate();
+            var loadedAsText = new List<string>();
+
+            foreach (var table in document.RootElement.GetProperty("model").GetProperty("tables").EnumerateArray())
+            {
+                if (!table.TryGetProperty("partitions", out var partitions) ||
+                    !partitions[0].GetProperty("source").TryGetProperty("expression", out var expression) ||
+                    expression.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                var query = string.Join("\n", expression.EnumerateArray().Select(line => line.GetString()));
+                foreach (var column in table.GetProperty("columns").EnumerateArray())
+                {
+                    if (column.TryGetProperty("type", out _) ||
+                        !column.TryGetProperty("dataType", out var dataType) ||
+                        dataType.GetString() != "dateTime")
+                    {
+                        continue;
+                    }
+
+                    var source = column.GetProperty("sourceColumn").GetString();
+                    if (!query.Contains($"{{\"{source}\", type datetime}}", StringComparison.Ordinal))
+                    {
+                        loadedAsText.Add($"{table.GetProperty("name").GetString()}.{source}");
+                    }
+                }
+            }
+
+            loadedAsText.Should().BeEmpty();
         }
 
         /// <summary>The report has an ASPX tab, and its Pages table shows audit usage in place of the remediation code.</summary>

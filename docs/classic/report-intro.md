@@ -10,7 +10,7 @@ When using the report from Power BI Desktop there are some things to understand:
 
 The report is driven by the exported CSV files. Even if you do not use Power BI, the CSV files contain the full assessment data — use the left navigation to learn more about each one:
 
-- [aspx.csv](csv-aspx.md) — all observed physical ASPX SQL facts, without business admission filters; includes blocked, modern, catalog, role and unknown observations.
+- [aspx.csv](csv-aspx.md) — all observed physical ASPX SQL facts, without business admission filters; includes files served as a download (NoExecute), modern, catalog, role and unknown observations.
 - [classicpages.csv](csv-classicpages.md) — one row per classic page, including its modernization-readiness columns.
 - [classicpagewebparts.csv](csv-classicpagewebparts.md) — one row per web part found on a classic page.
 - [classicwebpartunique.csv](csv-classicwebpartunique.md) — one row per unique web part type encountered across the assessment.
