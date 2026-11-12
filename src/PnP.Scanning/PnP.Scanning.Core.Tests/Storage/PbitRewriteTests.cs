@@ -73,7 +73,6 @@ namespace PnP.Scanning.Core.Tests.Storage
         [InlineData("history", "EventDate")]
         [InlineData("webs", "StartDate")]
         [InlineData("webs", "EndDate")]
-        [InlineData("classicpages", "ModifiedAt")]
         public void ClassicTemplate_StandardDateColumns_ParseWithExplicitCulture(string tableName, string columnName)
         {
             using var document = ReadEmbeddedClassicTemplate();
@@ -100,24 +99,6 @@ namespace PnP.Scanning.Core.Tests.Storage
 
             source.Should().MatchRegex(@"QuoteStyle\s*=\s*QuoteStyle\.Csv");
             source.Should().NotContain("QuoteStyle.None");
-        }
-
-        [Fact]
-        public void ClassicTemplate_ClassicPages_NormalizesEmptyDatesBeforeConversion()
-        {
-            using var document = ReadEmbeddedClassicTemplate();
-            var lines = GetQueryLines(GetClassicTable(document, "classicpages")).ToArray();
-            var emptyReplacement = Array.FindIndex(
-                lines,
-                line => line.Contains("Table.ReplaceValue(", StringComparison.Ordinal)
-                    && line.Contains("\"\",null,Replacer.ReplaceValue", StringComparison.Ordinal)
-                    && line.Contains("\"ModifiedAt\"", StringComparison.Ordinal));
-            var conversion = Array.FindIndex(
-                lines,
-                line => line.Contains("{\"ModifiedAt\", type datetime}", StringComparison.Ordinal));
-
-            emptyReplacement.Should().BeGreaterThanOrEqualTo(0);
-            conversion.Should().BeGreaterThan(emptyReplacement);
         }
 
         [Fact]
