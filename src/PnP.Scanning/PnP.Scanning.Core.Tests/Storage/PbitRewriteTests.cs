@@ -73,6 +73,7 @@ namespace PnP.Scanning.Core.Tests.Storage
         [InlineData("history", "EventDate")]
         [InlineData("webs", "StartDate")]
         [InlineData("webs", "EndDate")]
+        [InlineData("classicpages", "ModifiedAt")]
         public void ClassicTemplate_StandardDateColumns_ParseWithExplicitCulture(string tableName, string columnName)
         {
             using var document = ReadEmbeddedClassicTemplate();
@@ -163,32 +164,53 @@ namespace PnP.Scanning.Core.Tests.Storage
                 .BeTrue();
         }
 
+        /// <summary>An empty modified date in classicpages.csv becomes a blank before the date conversion.</summary>
+        [Fact]
+        public void ClassicTemplate_ClassicPages_ReadsEmptyModifiedAtAsBlank()
+        {
+            using var document = ReadEmbeddedClassicTemplate();
+            var lines = GetQueryLines(GetClassicTable(document, "classicpages")).ToArray();
+            var blanks = Array.FindIndex(
+                lines,
+                line => line.Contains("Table.ReplaceValue(", StringComparison.Ordinal) &&
+                        line.Contains("\"\",null", StringComparison.Ordinal) &&
+                        line.Contains("\"ModifiedAt\"", StringComparison.Ordinal));
+            var conversion = Array.FindIndex(
+                lines,
+                line => line.Contains("{\"ModifiedAt\", type datetime}", StringComparison.Ordinal));
+
+            blanks.Should().NotBe(-1);
+            conversion.Should().BeGreaterThan(blanks);
+        }
+
         /// <summary>The report has an ASPX tab, and its Pages table shows audit usage in place of the remediation code.</summary>
         [Fact]
         public void ClassicTemplate_Layout_HasAspxTabAndPagesAuditColumns()
         {
-            const string resourceName = "PnP.Scanning.Core.Scanners.Classic.ClassicAssessmentReport.pbit";
-            using var pbit = typeof(ReportManager).Assembly.GetManifestResourceStream(resourceName);
-            pbit.Should().NotBeNull();
-            using var archive = new ZipArchive(pbit, ZipArchiveMode.Read);
-            var entry = archive.GetEntry("Report/Layout");
-            entry.Should().NotBeNull();
-            using var reader = new StreamReader(entry.Open(), Encoding.Unicode);
-            using var layout = JsonDocument.Parse(reader.ReadToEnd());
-
-            var sections = layout.RootElement.GetProperty("sections").EnumerateArray().ToArray();
-            sections.Select(section => section.GetProperty("displayName").GetString()).Should().Contain("ASPX");
-            var pages = sections.Single(section => section.GetProperty("displayName").GetString() == "Pages");
-            var visuals = string.Concat(
-                pages.GetProperty("visualContainers")
-                    .EnumerateArray()
-                    .Select(visual => visual.GetProperty("config").GetString()));
-
-            visuals.Should()
+            ReadEmbeddedClassicTabVisuals("ASPX").Should().Contain("aspx.AspxCategory");
+            ReadEmbeddedClassicTabVisuals("Pages").Should()
                 .Contain("classicpages.AuditViewsCount")
                 .And.Contain("classicpages.AuditUniqueUsers")
                 .And.Contain("MC1464926")
                 .And.NotContain("RemediationCode");
+        }
+
+        /// <summary>The ASPX table tells how SharePoint serves each file; the customization status stays in the CSV.</summary>
+        [Fact]
+        public void ClassicTemplate_Layout_AspxTableShowsServedAs()
+        {
+            using var document = ReadEmbeddedClassicTemplate();
+            var served = GetQueryLines(GetClassicTable(document, "aspx"))
+                .Single(line => line.Contains("\"ServedAs\"", StringComparison.Ordinal));
+
+            served.Should()
+                .Contain("[NoExecute] = true then \"Download\"")
+                .And.Contain("[NoExecute] = false then \"May render\"")
+                .And.Contain("else \"Unknown\"");
+            ReadEmbeddedClassicTabVisuals("ASPX").Should()
+                .Contain("aspx.ServedAs")
+                .And.NotContain("aspx.NoExecute")
+                .And.NotContain("CustomizedPageStatus");
         }
 
         [Fact]
@@ -286,6 +308,27 @@ namespace PnP.Scanning.Core.Tests.Storage
             using var pbit = typeof(ReportManager).Assembly.GetManifestResourceStream(resourceName);
             pbit.Should().NotBeNull();
             return JsonDocument.Parse(ReadDataModelSchema(pbit));
+        }
+
+        // Returns the visual configurations of one report tab from the embedded template's layout.
+        private static string ReadEmbeddedClassicTabVisuals(string displayName)
+        {
+            const string resourceName = "PnP.Scanning.Core.Scanners.Classic.ClassicAssessmentReport.pbit";
+            using var pbit = typeof(ReportManager).Assembly.GetManifestResourceStream(resourceName);
+            pbit.Should().NotBeNull();
+            using var archive = new ZipArchive(pbit, ZipArchiveMode.Read);
+            var entry = archive.GetEntry("Report/Layout");
+            entry.Should().NotBeNull();
+            using var reader = new StreamReader(entry.Open(), Encoding.Unicode);
+            using var layout = JsonDocument.Parse(reader.ReadToEnd());
+
+            var tab = layout.RootElement.GetProperty("sections")
+                .EnumerateArray()
+                .Single(section => section.GetProperty("displayName").GetString() == displayName);
+            return string.Concat(
+                tab.GetProperty("visualContainers")
+                    .EnumerateArray()
+                    .Select(visual => visual.GetProperty("config").GetString()));
         }
 
         private static JsonElement GetClassicTable(JsonDocument document, string name)
