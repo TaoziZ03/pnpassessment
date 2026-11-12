@@ -32,7 +32,16 @@ internal sealed partial class PipelineStore
                 ClassicCompatibilityPayload? payload =
                     report.Payload.Value.Deserialize<ClassicCompatibilityPayload>() ??
                     throw new SnapshotIntegrityException("Classic compatibility publication is missing.");
-                ClassicPage[] legacyPages = ClassicCompatibility.LegacyPages(payload.Pages);
+                ClassicPage[] legacyPages = ClassicCompatibility.LegacyPages(
+                    payload.Pages,
+                    out ClassicPageOmission[] omitted);
+                foreach (IGrouping<string, ClassicPageOmission> leftOut in omitted.GroupBy(entry => entry.Reason))
+                    Serilog.Log.Warning(
+                        "{Count} classic page(s) were left out of the report tables of assessment {AssessmentId} ({Reason}); the report export lists each one in {File}",
+                        leftOut.Count(),
+                        assessment,
+                        leftOut.Key,
+                        ClassicReportCsvProjection.OmittedCsv);
 
                 async Task Replace<T>(IEnumerable<T> rows) where T : class
                 {

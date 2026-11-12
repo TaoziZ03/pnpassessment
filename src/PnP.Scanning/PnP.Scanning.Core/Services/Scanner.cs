@@ -431,6 +431,25 @@ namespace PnP.Scanning.Core.Services
                     new ReportStatus { Status = $"Exporting report data done", ReportPath = dataExportPath });
                 Log.Information("Report data exported for assessment {ScanId}", scanId);
 
+                long omittedPages = PnP.Scanning.Core.ClassicPages.Compatibility.ClassicReportCsvProjection
+                    .ReadOmittedPageCount(dataExportPath, scanId);
+                if (omittedPages > 0)
+                {
+                    await responseStream.WriteAsync(
+                        new ReportStatus
+                        {
+                            Status =
+                                $"{omittedPages} classic page(s) were left out of the report. " +
+                                PnP.Scanning.Core.ClassicPages.Compatibility.ClassicReportCsvProjection.OmittedCsv +
+                                " lists each one with the reason",
+                            Type = Constants.MessageWarning
+                        });
+                    Log.Warning(
+                        "{Count} classic page(s) were left out of the report for assessment {ScanId}",
+                        omittedPages,
+                        scanId);
+                }
+
                 if (request.Mode == ReportMode.PowerBI.ToString())
                 {
                     await responseStream.WriteAsync(new ReportStatus { Status = $"Start Building Power BI report" });

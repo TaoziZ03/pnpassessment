@@ -21,6 +21,7 @@ internal static class ClassicReportCsvProjection
     internal const string AspxCsv = "aspx.csv";
     internal const string PagesCsv = "classicpages.csv";
     internal const string SummaryJson = "classicpagessummary.json";
+    internal const string OmittedCsv = "classicpagesomitted.csv";
 
     /// <summary>
     /// Writes all physical ASPX SQL facts and then exports Pages from the latest verified native publication.
@@ -73,12 +74,13 @@ internal static class ClassicReportCsvProjection
                     0,
                     0,
                     count,
+                    0,
                     0),
                 token);
             return;
         }
 
-        ClassicPageCsvRow[] rows = SelectPages(source);
+        ClassicPageCsvRow[] rows = SelectPages(source, out ClassicPageOmission[] omitted);
         await using StreamWriter writer = new(Path.Combine(directory, PagesCsv), false, new UTF8Encoding(false));
         using CsvWriter csv = new(writer, configuration);
         csv.WriteHeader<ClassicPageCsvRow>();
@@ -105,9 +107,37 @@ internal static class ClassicReportCsvProjection
                 rows.LongCount(row => row.NoExecute == false),
                 rows.LongCount(row => row.ObjectKind == nameof(PageObjectKind.File) && row.NoExecute == null),
                 0,
-                source.Publication.Files.LongCount(IsAspx)),
+                source.Publication.Files.LongCount(IsAspx),
+                omitted.LongLength),
             token);
+        await WriteRowsAsync(directory, OmittedCsv, omitted, configuration, token);
         await ExportRelatedAsync(context, source, rows, directory, configuration, token);
+    }
+
+    /// <summary>
+    /// Reads how many Pages the export in this folder left out for this assessment. A missing summary, or one written
+    /// for another assessment, counts as none.
+    /// </summary>
+    internal static long ReadOmittedPageCount(string directory, Guid assessmentId)
+    {
+        string path = Path.Combine(directory, SummaryJson);
+        if (!File.Exists(path)) return 0;
+        try
+        {
+            using JsonDocument summary = JsonDocument.Parse(File.ReadAllText(path));
+            JsonElement root = summary.RootElement;
+            return root.ValueKind == JsonValueKind.Object &&
+                   root.TryGetProperty(nameof(PageExportSummary.ScanId), out JsonElement scan) &&
+                   scan.ValueKind == JsonValueKind.String && scan.TryGetGuid(out Guid id) && id == assessmentId &&
+                   root.TryGetProperty(nameof(PageExportSummary.OmittedPageCount), out JsonElement count) &&
+                   count.ValueKind == JsonValueKind.Number && count.TryGetInt64(out long value)
+                ? value
+                : 0;
+        }
+        catch (Exception error) when (error is IOException or JsonException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>
@@ -322,7 +352,14 @@ internal static class ClassicReportCsvProjection
     /// Unknown NoExecute and unknown list-role evidence are selected. Catalog role, experience, official status and
     /// item availability stay outside the predicate, and distinct native objects are never merged by URL.
     /// </summary>
-    internal static ClassicPageCsvRow[] SelectPages(ClassicReportSource source)
+    internal static ClassicPageCsvRow[] SelectPages(ClassicReportSource source) => SelectPages(source, out _);
+
+    /// <summary>
+    /// Selects the Pages as above and names every selected Page the URL-keyed CSV cannot carry: a selected file with
+    /// no analyzed Page, a Page without an address, and every Page but one of those sharing a site, web and address.
+    /// Such a Page is left out of the rows and returned with its reason, so the export continues and stays countable.
+    /// </summary>
+    internal static ClassicPageCsvRow[] SelectPages(ClassicReportSource source, out ClassicPageOmission[] omitted)
     {
         Dictionary<PageIdentity, ClassicPageRow> pages = source.Publication.Pages.ToDictionary(page =>
             page.Identity?.Validated() ?? throw new SnapshotIntegrityException("CSV Page has no native identity."));
@@ -330,6 +367,7 @@ internal static class ClassicReportCsvProjection
             pages.Values.Any(page => page.ScanId != source.AssessmentId))
             throw new SnapshotIntegrityException("Native report objects belong to a different assessment.");
         List<ClassicPageCsvRow> selected = [];
+        List<ClassicPageOmission> left = [];
         foreach (SPFile facts in source.Publication.Files.Where(IsAspx))
         {
             AspxCsvRow file = new(facts);
@@ -337,8 +375,11 @@ internal static class ClassicReportCsvProjection
             if (file.NoExecute == true || type == null || file.IsListFamily) continue;
             PageIdentity identity = PageIdentity.File(facts.SiteCollectionId, facts.FileUniqueId);
             if (!pages.TryGetValue(identity, out ClassicPageRow? page))
-                throw new SnapshotIntegrityException(
-                    "An admitted ASPX file has no canonical Page; incomplete publication cannot substitute for export.");
+            {
+                left.Add(ClassicPageOmission.Of(facts, identity, type));
+                continue;
+            }
+
             selected.Add(
                 new(
                     page,
@@ -357,21 +398,28 @@ internal static class ClassicReportCsvProjection
             selected.Add(new(page, null, "BlogPage", source.AnalysisRunId, source.SnapshotId));
         }
 
-        Dictionary<(string Site, string Web, string Url), PageIdentity> locators = [];
+        Dictionary<(string Site, string Web, string Url), PageIdentity> owners = ClassicCompatibility.AddressOwners(
+            selected.Select(row => (row.Identity, row.SiteUrl, row.WebUrl, row.PageUrl)));
+        List<ClassicPageCsvRow> kept = [];
         foreach (ClassicPageCsvRow row in selected)
         {
             if (string.IsNullOrWhiteSpace(row.PageUrl))
-                throw new SnapshotIntegrityException("Selected native Page has no acquired report locator.");
-            (string Site, string Web, string Url) key = (row.SiteUrl.ToUpperInvariant(), row.WebUrl.ToUpperInvariant(),
-                ClassicPageAuditAnalysis.LocatorKey(row.PageUrl));
-            PageIdentity identity = row.Identity;
-            if (locators.TryGetValue(key, out PageIdentity? previous) && previous != identity)
-                throw new SnapshotIntegrityException(
-                    "Distinct native Pages share one legacy URL key; CSV export cannot silently deduplicate them.");
-            locators.Add(key, identity);
+            {
+                left.Add(ClassicPageOmission.Of(row, ClassicPageOmission.NoAddress));
+                continue;
+            }
+
+            PageIdentity owner = owners[ClassicCompatibility.AddressKey(row.SiteUrl, row.WebUrl, row.PageUrl)];
+            if (owner != row.Identity)
+            {
+                left.Add(ClassicPageOmission.Of(row, ClassicPageOmission.SharedAddress, owner));
+                continue;
+            }
+
+            kept.Add(row);
         }
 
-        foreach (ClassicPageCsvRow row in selected)
+        foreach (ClassicPageCsvRow row in kept)
         {
             ApplyUsage(row, source);
             Contracts.Web.WebFacts? web = source.Publication.Webs.SingleOrDefault(web =>
@@ -385,7 +433,8 @@ internal static class ClassicReportCsvProjection
                 row.UncustomizedHomePage = pages[row.Identity].UncustomizedHomePage;
         }
 
-        return selected.OrderBy(row => row.ContentKey, StringComparer.Ordinal).ToArray();
+        omitted = left.OrderBy(row => row.ContentKey, StringComparer.Ordinal).ToArray();
+        return kept.OrderBy(row => row.ContentKey, StringComparer.Ordinal).ToArray();
     }
 
     /// <summary>Maps exact fully qualified handler names to familiar page labels without guessing aliases or metadata types.</summary>
@@ -479,7 +528,8 @@ internal static class ClassicReportCsvProjection
         long NoExecuteFalseCount,
         long NoExecuteUnknownCount,
         long LegacyPageCount,
-        long PhysicalAspxCount);
+        long PhysicalAspxCount,
+        long OmittedPageCount);
 
     /// <summary>Counts every raw SQL ASPX row actually written, including blocked, allowed and unknown NoExecute observations.</summary>
     private sealed record AspxExportSummary(
